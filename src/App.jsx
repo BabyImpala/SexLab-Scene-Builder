@@ -7,7 +7,8 @@ import { History } from "@antv/x6-plugin-history";
 import { Menu, Layout, Card, Input, Space, Button, Empty, Modal, Tooltip, notification, Divider, Switch, Checkbox, Row, Col, InputNumber, Select, ConfigProvider, theme } from 'antd'
 import {
   ExperimentOutlined, FolderOutlined, PlusOutlined, ExclamationCircleOutlined, QuestionCircleOutlined, DiffOutlined, ZoomInOutlined, ZoomOutOutlined,
-  DeleteOutlined, DoubleLeftOutlined, DoubleRightOutlined, PicCenterOutlined, CompressOutlined, PushpinOutlined, DragOutlined, WarningOutlined
+  DeleteOutlined, DoubleLeftOutlined, DoubleRightOutlined, PicCenterOutlined, CompressOutlined, PushpinOutlined, DragOutlined, WarningOutlined,
+  ApartmentOutlined
 } from '@ant-design/icons';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import './ResizableSidebar.css';
@@ -168,7 +169,11 @@ function App() {
         setEdited(true);
       })
       .on("node:clone", ({ node }) => {
-        invoke('open_stage_editor_from', { activeScene: node.prop('scene'), stage: node.prop('stage') });
+        // Tauri maps copy_stage → copyStage; passing `stage` makes the invoke fail
+        invoke('open_stage_editor_from', {
+          activeScene: node.prop('scene'),
+          copyStage: node.prop('stage'),
+        });
       })
 
     setGraph(newGraph);
@@ -219,9 +224,9 @@ function App() {
         updateNodeProps(stage, node, activeScene);
         updatedScene = activeScene;
       } else {
-        updatedSceneIdx = scenes.findIndex(it => it.id === sceneId);
+        updatedSceneIdx = scenes.findIndex(it => it.id === scene);
         if (updatedSceneIdx === -1) {
-          console.error("Scene not found in scenes list", sceneId, scenes);
+          console.error("Scene not found in scenes list", scene, scenes);
           return;
         }
         updatedScene = scenes[updatedSceneIdx];
@@ -234,7 +239,7 @@ function App() {
         updatedScene.stages.push(stage);
         if (updatedScene.stages.length === 1) {
           // If this is the first stage, set it as the start stage
-          node.prop('isStart', true);
+          if (node) node.prop('isStart', true);
           updatedScene.root = stage.id;
         }
       } else {
@@ -406,36 +411,125 @@ function App() {
         });
       });
     }
+    // Converted / default graphs often stack every stage at (40, 40)
+    if (nodesAreStacked(nodes)) {
+      arrangeStages(newscene.root, false);
+    } else {
+      graph.centerContent();
+    }
     inEdit.current = false;
-    graph.centerContent();
     setEdited(false);
   }
 
-  let stageToGraphX = 40;
-  let stageToGraphY = 40;
   const gridSize = 200;
-  // const DEFAULT_STAGE_WIDTH = 120;
-  // const DEFAULT_STAGE_HEIGHT = 60;
+  const LAYOUT_H_GAP = 220;
+  const LAYOUT_V_GAP = 140;
 
-  // Kind of works but it does not track state of the nodes so its really only useful for inital adding of stages.
-  // TODO: Fix this probably need to use state for this
-  const addStageToGraph = (stage) => {
+  const nodesAreStacked = (nodes) => {
+    if (nodes.length < 2) return false;
+    const positions = nodes.map((n) => n.getPosition());
+    const first = positions[0];
+    return positions.every((p) => p.x === first.x && p.y === first.y);
+  };
+
+  // Layered layout from the root following edge connections (left → right by depth)
+  const arrangeStages = (rootId = activeScene?.root, markEdited = true) => {
+    if (!graph) return;
     const nodes = graph.getNodes();
-    if (nodes.length > 0) {
-      stageToGraphX += gridSize;
-      if (stageToGraphX > graph.container.clientWidth - gridSize) {
-        stageToGraphX = 40;
-        stageToGraphY += gridSize;
+    if (!nodes.length) return;
+
+    const start =
+      nodes.find((n) => n.id === rootId) ||
+      nodes.find((n) => n.prop('isStart')) ||
+      nodes[0];
+
+    const outgoing = new Map();
+    nodes.forEach((n) => {
+      const edges = graph.getOutgoingEdges(n) || [];
+      outgoing.set(
+        n.id,
+        edges.map((e) => e.getTargetCellId()).filter(Boolean)
+      );
+    });
+
+    const level = new Map();
+    const queue = [start.id];
+    level.set(start.id, 0);
+    while (queue.length) {
+      const id = queue.shift();
+      for (const dest of outgoing.get(id) || []) {
+        if (!level.has(dest)) {
+          level.set(dest, level.get(id) + 1);
+          queue.push(dest);
+        }
+      }
+    }
+
+    const orphans = nodes.filter((n) => !level.has(n.id)).map((n) => n.id);
+    const byLevel = new Map();
+    for (const [id, lv] of level) {
+      if (!byLevel.has(lv)) byLevel.set(lv, []);
+      byLevel.get(lv).push(id);
+    }
+
+    for (const [lv, ids] of [...byLevel.entries()].sort((a, b) => a[0] - b[0])) {
+      ids.forEach((id, i) => {
+        const node = graph.getCellById(id);
+        if (node) {
+          node.setPosition(40 + lv * LAYOUT_H_GAP, 40 + i * LAYOUT_V_GAP);
+        }
+      });
+    }
+
+    // Unreachable nodes share one row under the main graph (avoid stretching width)
+    if (orphans.length) {
+      const maxRows = Math.max(
+        1,
+        ...[...byLevel.values()].map((ids) => ids.length),
+        0
+      );
+      const orphanY = 40 + maxRows * LAYOUT_V_GAP;
+      orphans.forEach((id, i) => {
+        const node = graph.getCellById(id);
+        if (node) {
+          node.setPosition(40 + i * LAYOUT_H_GAP, orphanY);
+        }
+      });
+    }
+
+    graph.zoomToFit({ padding: 24, maxScale: 1 });
+    graph.centerContent();
+    if (markEdited) setEdited(true);
+  };
+
+  // Place new stages at x/y when provided; otherwise to the right of existing nodes
+  const addStageToGraph = (stage, x, y) => {
+    let posX = x;
+    let posY = y;
+    const hasPos = typeof posX === 'number' && typeof posY === 'number';
+    if (!hasPos) {
+      posX = 40;
+      posY = 40;
+      const nodes = graph.getNodes();
+      if (nodes.length > 0) {
+        const positions = nodes.map((n) => n.getPosition());
+        const rightmost = positions.reduce((a, b) => (a.x >= b.x ? a : b));
+        posX = rightmost.x + gridSize;
+        posY = rightmost.y;
+        const maxWidth = graph.container?.clientWidth || 800;
+        if (posX > maxWidth - gridSize) {
+          const maxY = Math.max(...positions.map((p) => p.y));
+          posX = 40;
+          posY = maxY + gridSize;
+        }
       }
     }
 
     const node = graph.addNode({
       shape: 'stage_node',
       id: stage.id,
-      x: stageToGraphX,
-      y: stageToGraphY,
-      // width: DEFAULT_STAGE_WIDTH,
-      // height: DEFAULT_STAGE_HEIGHT,
+      x: posX,
+      y: posY,
     });
     return node;
   };
@@ -763,6 +857,17 @@ function App() {
                                     size="small"
                                     icon={<PicCenterOutlined />}
                                     onClick={() => graph.zoomToFit()}
+                                  />
+                                </Tooltip>
+                                <Tooltip
+                                  title="Arrange stages"
+                                  mouseEnterDelay={0.5}
+                                >
+                                  <Button
+                                    type="text"
+                                    size="small"
+                                    icon={<ApartmentOutlined />}
+                                    onClick={() => arrangeStages()}
                                   />
                                 </Tooltip>
                                 <Tooltip

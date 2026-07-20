@@ -124,7 +124,7 @@ fn main() {
             )
             .title(DEFAULT_MAINWINDOW_TITLE)
             .menu(get_menu(&app.app_handle()).expect("Failed to create menu"))
-            .min_inner_size(960.0, 540.0)
+            .min_inner_size(800.0, 500.0)
             .inner_size(1280.0, 720.0)
             .build()
             .expect("Failed to create main window")
@@ -267,7 +267,7 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         }
         "open_docs" => {
             let _ = app.opener().open_url(
-                "https://github.com/Scrabx3/SexLab/wiki/Scene-Builder",
+                "https://slp-community.github.io/SexLab-Wiki/slsb/creating-packs-using-slsb/",
                 Option::<String>::None,
             );
         }
@@ -393,13 +393,19 @@ struct EditorPayload {
 
 fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: EditorPayload) {
     let stage = &payload.stage;
+    let label = format!("stage_editor_{}", stage.id.0);
     info!(
         "Opening Stage {} from Scene {}",
         stage.id.0, payload.scene.0
     );
-    let window = WebviewWindowBuilder::new(
+    // Reopening the same stage must focus the existing window (labels are unique)
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.set_focus();
+        return;
+    }
+    let window = match WebviewWindowBuilder::new(
         app,
-        format!("stage_editor_{}", stage.id.0),
+        label,
         tauri::WebviewUrl::App("./stage.html".into()),
     )
     .title(format!(
@@ -410,16 +416,24 @@ fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: Editor
             stage.name.as_str()
         }
     ))
-    .min_inner_size(800.0, 600.0)
+    .min_inner_size(720.0, 540.0)
     .inner_size(1152.0, 864.0)
     .resizable(true)
     .build()
-    .expect(&format!(
-        "Failed to create stage editor window for Stage {}",
-        stage.id.0
-    ));
+    {
+        Ok(w) => w,
+        Err(e) => {
+            error!(
+                "Failed to create stage editor window for Stage {}: {}",
+                stage.id.0, e
+            );
+            return;
+        }
+    };
     window.clone().once("on_request_data", move |_| {
-        window.emit("on_data_received", payload.clone()).unwrap();
+        if let Err(e) = window.emit("on_data_received", payload.clone()) {
+            error!("Failed to send stage editor payload: {}", e);
+        }
     });
 }
 
@@ -445,11 +459,17 @@ async fn open_stage_editor_from<R: Runtime>(
     active_scene: Scene,
     copy_stage: Stage,
 ) -> () {
+    // Clone must get a fresh id so save inserts a new stage instead of overwriting the source
+    let mut stage = copy_stage;
+    stage.id = NanoID::new_nanoid();
+    if !stage.name.is_empty() {
+        stage.name = format!("{} (Copy)", stage.name);
+    }
     open_stage_editor_impl(
         &app,
         EditorPayload {
             scene: active_scene.id.clone(),
-            stage: copy_stage.clone(),
+            stage,
             positions: active_scene.positions.clone(),
         },
     );
