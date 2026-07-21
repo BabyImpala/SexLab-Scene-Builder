@@ -17,6 +17,8 @@ pub mod position_info;
 
 pub mod define;
 
+pub mod slanim_source;
+
 mod serialize;
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
