@@ -82,6 +82,17 @@
               "short": "o"
             }
           ]
+        },
+        "generate-behaviors": {
+          "description": "Generate FNIS_*_Behavior.hkx from FNIS AnimLists under a folder",
+          "args": [
+            {
+              "name": "in",
+              "takesValue": true,
+              "short": "i",
+              "description": "Root folder containing FNIS_*_List.txt files"
+            }
+          ]
         }
       }
     }

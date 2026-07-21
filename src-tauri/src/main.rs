@@ -110,14 +110,15 @@ fn main() {
                     "convert" => cli::convert(command.matches.args),
                     "build" => cli::build(command.matches.args),
                     "export-slal" => cli::export_slal(command.matches.args),
+                    "generate-behaviors" => cli::generate_behaviors(command.matches.args),
                     _ => Err(format!("Unrecognized subcommand: {}", command.name)),
-                }
-                .map_err(|e| {
+                };
+                if let Err(e) = &res {
                     error!("Error while processing CLI command: {}", e);
-                    Box::<dyn std::error::Error>::from(e)
-                });
-                app.handle().exit(res.is_err() as i32);
-                return res;
+                }
+                // Exit here so CLI never falls through into the GTK event loop
+                // (needed for headless generate-behaviors / CI smoke tests).
+                std::process::exit(res.is_err() as i32);
             }
             let app_handle = app.app_handle().clone();
             WebviewWindowBuilder::new(

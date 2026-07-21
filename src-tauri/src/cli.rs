@@ -84,3 +84,22 @@ pub fn export_slal(
   let project = Package::from_file(file)?;
   project.write_slal_pack(&out_dir)
 }
+
+pub fn generate_behaviors(
+  args: std::collections::HashMap<String, tauri_plugin_cli::ArgData>,
+) -> Result<(), String> {
+  let in_path = match &args.get("in").unwrap().value {
+      serde_json::Value::String(value) => PathBuf::from(value),
+      _ => return Err("input dir not provided".to_string()),
+  };
+  if !in_path.exists() || !in_path.is_dir() {
+      return Err("input dir is invalid".to_string());
+  }
+  let paths = crate::project::behavior_gen::generate_behaviors_under(&in_path)
+    .map_err(|e| e.to_string())?;
+  println!("Generated {} behavior file(s)", paths.len());
+  for p in paths {
+    println!("  {}", p.display());
+  }
+  Ok(())
+}
