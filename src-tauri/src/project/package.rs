@@ -743,7 +743,7 @@ impl Package {
                     continue;
                 }
                 let lines =
-                    make_fnis_lines_slal_sequence(&anim_id, &stage_rows, race == "Human");
+                    make_fnis_lines_slal_sequence(&anim_id, &stage_rows);
                 insert_fnis_race_lines_owned(&mut events, race.as_str(), lines);
             }
         }
