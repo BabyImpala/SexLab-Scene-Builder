@@ -19,6 +19,8 @@ pub mod define;
 
 pub mod slanim_source;
 
+pub mod behavior_gen;
+
 mod serialize;
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
