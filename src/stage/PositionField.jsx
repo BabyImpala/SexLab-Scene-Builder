@@ -329,14 +329,14 @@ function PositionField({ position, info, onChange }) {
             <InputNumber
               addonBefore={'Factor'}
               controls
-              decimalSeparator=","
+              decimalSeparator="."
               precision={2}
               min={0.01}
               max={2}
               step={0.01}
               value={info.scale}
               onChange={(e) => {
-                onChange(position, { ...info, scale: e });
+                onChange(position, { ...info, scale: typeof e === 'number' ? e : 1.0 });
               }}
               placeholder="1.0"
             />
