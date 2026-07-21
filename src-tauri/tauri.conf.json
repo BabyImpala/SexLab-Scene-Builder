@@ -15,7 +15,7 @@
       "icons/icon.ico"
     ],
     "category": "DeveloperTool",
-    "copyright": "Copyright Scrab 2023. All rights reserved.",
+    "copyright": "Copyright Scrab and contributors. Licensed under Apache-2.0.",
     "targets": ["deb", "rpm", "nsis", "msi"],
     "linux": {
       "deb": {
@@ -50,6 +50,26 @@
           ]
         },
         "build": {
+          "args": [
+            {
+              "name": "in",
+              "takesValue": true,
+              "short": "i"
+            },
+            {
+              "name": "out",
+              "takesValue": true,
+              "short": "o"
+            },
+            {
+              "name": "slal",
+              "takesValue": false,
+              "description": "Also write SLAnims/json SLAL registration (linear scenes only)"
+            }
+          ]
+        },
+        "export-slal": {
+          "description": "Export classic SLAL JSON from an SLSB project (refuses branching scenes)",
           "args": [
             {
               "name": "in",

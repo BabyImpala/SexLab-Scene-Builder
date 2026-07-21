@@ -18,9 +18,11 @@ pub struct Position {
     #[serde(default)] // addition 2.0
     pub tags: Vec<String>,
 
-    // Unused fields, but kept for compatibility
-    #[serde(skip_serializing, default)]
+    // Unused in .slr binary, but kept for project JSON / SLAL round-trip
+    #[serde(default)]
     pub schlong: i8,
+    #[serde(default)]
+    pub add_cum: i32,
     #[serde(skip_serializing, default)]
     pub extra: Extra,
     #[serde(skip_serializing, default)]
@@ -40,10 +42,11 @@ impl Position {
             strip_data: reference.map_or_else(|| Stripping::default(), |p| p.strip_data.clone()),
             climax: false,
             tags: Default::default(),
-            // Unused fields
+            // Unused in binary
             sex: Default::default(),
             race: "Human".into(),
-            schlong: Default::default(),
+            schlong: reference.map_or(0, |pos| pos.schlong),
+            add_cum: reference.map_or(0, |pos| pos.add_cum),
             extra: Default::default(),
             scale: 1.0,
         }
@@ -90,6 +93,7 @@ impl Position {
             submissive: self.extra.submissive,
             vampire: self.extra.vampire,
             dead: self.extra.dead,
+            add_cum: self.add_cum,
         }
     }
 }
