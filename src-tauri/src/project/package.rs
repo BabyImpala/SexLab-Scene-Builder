@@ -518,6 +518,7 @@ impl Package {
         println!("Compiling project {}", self.pack_name);
         self.write_binary_file(&root_dir)?;
         self.write_fnis_files_slsb(&root_dir)?;
+        self.generate_behaviors(&root_dir)?;
         info!(
             "Successfully compiled {}",
             root_dir.to_str().unwrap_or_default()
@@ -525,9 +526,21 @@ impl Package {
         Ok(())
     }
 
+    fn generate_behaviors(&self, root_dir: &PathBuf) -> Result<(), std::io::Error> {
+        match crate::project::behavior_gen::generate_behaviors_under(root_dir) {
+            Ok(paths) => {
+                info!("Generated {} behavior file(s)", paths.len());
+                Ok(())
+            }
+            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+        }
+    }
+
     pub fn write_slal_pack(&self, root_dir: &PathBuf) -> Result<(), String> {
         self.write_slal(root_dir)?;
-        self.write_fnis_files_slal(root_dir)
+        self.write_fnis_files_slal(root_dir)?;
+        self.generate_behaviors(root_dir)
+            .map_err(|e| e.to_string())
     }
 
     pub fn write_slal(&self, root_dir: &PathBuf) -> Result<(), String> {
