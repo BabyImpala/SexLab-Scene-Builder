@@ -1,5 +1,24 @@
 use super::animlist::AnimLine;
 
+/// Escape text for Havok XML element bodies / attribute values.
+/// No-op for typical FNIS event names (keeps byte-identical output).
+fn xml_escape(s: &str) -> String {
+    if !s.bytes().any(|b| matches!(b, b'&' | b'<' | b'>' | b'"')) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 struct IdGen {
     next: u32,
 }
@@ -56,8 +75,8 @@ pub fn build_behavior_xml(pack_name: &str, lines: &[AnimLine], fixed_events: &[&
         } else {
             "MODE_LOOPING"
         };
-        let clip_name = format!("{}_{}", pack_name, line.file_stem());
-        let anim_path = format!(r"Animations\{}\{}", pack_name, line.file);
+        let clip_name = xml_escape(&format!("{}_{}", pack_name, line.file_stem()));
+        let anim_path = xml_escape(&format!(r"Animations\{}\{}", pack_name, line.file));
 
         if line.has_anim_objects() {
             // enter ID reserved before new payloads (enter_id < first new payload).
@@ -82,7 +101,7 @@ pub fn build_behavior_xml(pack_name: &str, lines: &[AnimLine], fixed_events: &[&
                 let trig_id = ids.alloc();
                 // Emit triggers after enter/exit, before clip (md+a packs).
                 for (pid, name) in &new_payloads {
-                    body.push_str(&string_payload(pid, name));
+                    body.push_str(&string_payload(pid, &xml_escape(name)));
                 }
                 body.push_str(&event_prop_array(&enter_id, &enter_events));
                 body.push_str(&event_prop_array(&exit_id, &[(5, None), (1, None)]));
@@ -90,7 +109,7 @@ pub fn build_behavior_xml(pack_name: &str, lines: &[AnimLine], fixed_events: &[&
                 trig_id
             } else {
                 for (pid, name) in &new_payloads {
-                    body.push_str(&string_payload(pid, name));
+                    body.push_str(&string_payload(pid, &xml_escape(name)));
                 }
                 body.push_str(&event_prop_array(&enter_id, &enter_events));
                 body.push_str(&event_prop_array(&exit_id, &[(5, None), (1, None)]));
@@ -110,7 +129,7 @@ pub fn build_behavior_xml(pack_name: &str, lines: &[AnimLine], fixed_events: &[&
                 &enter_id,
                 &exit_id,
                 &clip_id,
-                &line.event,
+                &xml_escape(&line.event),
                 state_index as i32,
             ));
         } else {
@@ -154,7 +173,7 @@ pub fn build_behavior_xml(pack_name: &str, lines: &[AnimLine], fixed_events: &[&
                 &enter_id,
                 &exit_id,
                 &clip_id,
-                &line.event,
+                &xml_escape(&line.event),
                 state_index as i32,
             ));
         }
@@ -461,7 +480,7 @@ fn variable_value_set(id: &str) -> String {
 fn string_data(id: &str, event_names: &[String]) -> String {
     let events: String = event_names
         .iter()
-        .map(|e| format!("\n\t\t\t\t<hkcstring>{e}</hkcstring>"))
+        .map(|e| format!("\n\t\t\t\t<hkcstring>{}</hkcstring>", xml_escape(e)))
         .collect();
     format!(
         r#"

@@ -22,8 +22,13 @@ pub enum BehaviorGenError {
     Io(io::Error),
     Parse(AnimlistParseError),
     Pack(HkxPackError),
-    Unsupported(String),
+    /// Expected skip (classic s/+, canine alias lists already filtered by path).
+    Skipped(String),
+    /// AnimList is not under `meshes/actors/.../animations/<pack>/`.
+    InvalidLayout(String),
     EmptyList,
+    /// One or more hard failures while walking a tree.
+    Failed(String),
 }
 
 impl std::fmt::Display for BehaviorGenError {
@@ -32,7 +37,7 @@ impl std::fmt::Display for BehaviorGenError {
             Self::Io(e) => write!(f, "{e}"),
             Self::Parse(e) => write!(f, "{e}"),
             Self::Pack(e) => write!(f, "{e}"),
-            Self::Unsupported(s) => write!(f, "{s}"),
+            Self::Skipped(s) | Self::InvalidLayout(s) | Self::Failed(s) => write!(f, "{s}"),
             Self::EmptyList => write!(f, "AnimList has no animation lines"),
         }
     }
@@ -56,6 +61,33 @@ impl From<HkxPackError> for BehaviorGenError {
     }
 }
 
+/// True when `list_path` is `.../meshes/actors/<race...>/animations/<pack>/FNIS_*_List.txt`.
+fn is_fnis_animlist_layout(list_path: &Path) -> bool {
+    let components: Vec<&str> = list_path.iter().filter_map(|c| c.to_str()).collect();
+    let Some(meshes_idx) = components
+        .iter()
+        .position(|c| c.eq_ignore_ascii_case("meshes"))
+    else {
+        return false;
+    };
+    let Some(actors_idx) = components
+        .iter()
+        .position(|c| c.eq_ignore_ascii_case("actors"))
+    else {
+        return false;
+    };
+    let Some(anim_idx) = components
+        .iter()
+        .position(|c| c.eq_ignore_ascii_case("animations"))
+    else {
+        return false;
+    };
+    // meshes/actors/<≥1 race components>/animations/<pack>/file
+    actors_idx == meshes_idx + 1
+        && anim_idx > actors_idx + 1
+        && components.len() == anim_idx + 3
+}
+
 /// Derive Behavior.hkx output path from an FNIS AnimList path.
 pub fn behavior_path_for_list(list_path: &Path) -> Option<PathBuf> {
     let file_name = list_path.file_name()?.to_str()?;
@@ -64,6 +96,9 @@ pub fn behavior_path_for_list(list_path: &Path) -> Option<PathBuf> {
     }
     // Skip canine alias lists (dog/wolf carry the graphs).
     if file_name.to_ascii_lowercase().contains("_canine_list.txt") {
+        return None;
+    }
+    if !is_fnis_animlist_layout(list_path) {
         return None;
     }
 
@@ -93,8 +128,23 @@ pub fn pack_name_from_list(list_path: &Path) -> Option<String> {
 
 /// Generate Behavior.hkx next to the natural behaviors folder for this list.
 pub fn generate_behavior_for_list(list_path: &Path) -> Result<PathBuf, BehaviorGenError> {
+    let file_name = list_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if file_name.to_ascii_lowercase().contains("_canine_list.txt") {
+        return Err(BehaviorGenError::Skipped(
+            "canine alias AnimList (dog/wolf carry Behavior graphs)".into(),
+        ));
+    }
+    if !is_fnis_animlist_layout(list_path) {
+        return Err(BehaviorGenError::InvalidLayout(format!(
+            "AnimList must be under meshes/actors/<race>/animations/<pack>/: {}",
+            list_path.display()
+        )));
+    }
     let out = behavior_path_for_list(list_path).ok_or_else(|| {
-        BehaviorGenError::Unsupported(format!(
+        BehaviorGenError::InvalidLayout(format!(
             "cannot map Behavior path for {}",
             list_path.display()
         ))
@@ -105,7 +155,7 @@ pub fn generate_behavior_for_list(list_path: &Path) -> Result<PathBuf, BehaviorG
 
 pub fn generate_behavior_to(list_path: &Path, out_hkx: &Path) -> Result<(), BehaviorGenError> {
     let pack = pack_name_from_list(list_path).ok_or_else(|| {
-        BehaviorGenError::Unsupported(format!(
+        BehaviorGenError::InvalidLayout(format!(
             "cannot determine pack name from {}",
             list_path.display()
         ))
@@ -117,34 +167,57 @@ pub fn generate_behavior_to(list_path: &Path, out_hkx: &Path) -> Result<(), Beha
     }
     // v1: only singular `b` lines (P+). Reject classic s/+ so we do not write wrong graphs.
     if lines.iter().any(|l| l.anim_type != "b") {
-        return Err(BehaviorGenError::Unsupported(
+        return Err(BehaviorGenError::Skipped(
             "behavior generator v1 supports only `b` AnimList lines (P+/SLSB); classic s/+ not yet implemented"
                 .into(),
         ));
     }
 
-    let race = match race_path_from_list(list_path) {
-        Some(r) => r,
-        None => {
-            warn!(
-                "could not parse race path from {}; defaulting to character events",
-                list_path.display()
-            );
-            "character".into()
-        }
-    };
+    let race = race_path_from_list(list_path).ok_or_else(|| {
+        BehaviorGenError::InvalidLayout(format!(
+            "could not parse race path from {}",
+            list_path.display()
+        ))
+    })?;
     let fixed = fixed_events_for_race(&race);
     let xml = build_behavior_xml(&pack, &lines, &fixed);
+
     if let Some(parent) = out_hkx.parent() {
         fs::create_dir_all(parent)?;
     }
-    let xml_path = out_hkx.with_extension("xml");
-    fs::write(&xml_path, xml)?;
-    xml_to_hkx(&xml_path, out_hkx)?;
-    // Keep intermediate XML only if SLSB_KEEP_BEHAVIOR_XML=1
-    if std::env::var_os("SLSB_KEEP_BEHAVIOR_XML").is_none() {
-        let _ = fs::remove_file(&xml_path);
+
+    // Stage in a sibling dir with real .xml/.hkx extensions (serde-hkx requires
+    // them), then rename the HKX into place so a failed pack never truncates
+    // the destination.
+    let staging_dir = out_hkx.with_extension("slsb-staging");
+    let _ = fs::remove_dir_all(&staging_dir);
+    fs::create_dir_all(&staging_dir)?;
+    let staging_xml = staging_dir.join("Behavior.xml");
+    let staging_hkx = staging_dir.join("Behavior.hkx");
+    let keep_xml = std::env::var_os("SLSB_KEEP_BEHAVIOR_XML").is_some();
+    let final_xml = out_hkx.with_extension("xml");
+
+    let cleanup = || {
+        let _ = fs::remove_dir_all(&staging_dir);
+    };
+
+    if let Err(e) = fs::write(&staging_xml, &xml) {
+        cleanup();
+        return Err(e.into());
     }
+    if let Err(e) = xml_to_hkx(&staging_xml, &staging_hkx) {
+        cleanup();
+        return Err(e.into());
+    }
+    if let Err(e) = fs::rename(&staging_hkx, out_hkx) {
+        cleanup();
+        return Err(e.into());
+    }
+    if keep_xml {
+        let _ = fs::rename(&staging_xml, &final_xml);
+    }
+    cleanup();
+
     info!(
         "Generated behavior {} from {}",
         out_hkx.display(),
@@ -160,14 +233,14 @@ pub fn generate_behaviors_under(root: &Path) -> Result<Vec<PathBuf>, BehaviorGen
     visit_lists(root, &mut |list| {
         match generate_behavior_for_list(list) {
             Ok(path) => generated.push(path),
-            Err(BehaviorGenError::Unsupported(msg)) => {
+            Err(BehaviorGenError::Skipped(msg)) => {
                 warn!("skipping {}: {msg}", list.display());
             }
             Err(e) => errors.push(format!("{}: {e}", list.display())),
         }
     })?;
     if !errors.is_empty() {
-        return Err(BehaviorGenError::Unsupported(errors.join("\n")));
+        return Err(BehaviorGenError::Failed(errors.join("\n")));
     }
     Ok(generated)
 }
@@ -263,7 +336,6 @@ mod smoke_tests {
     }
 
     #[test]
-    #[ignore = "requires research/behavior_samples"]
     fn chaurus_matches_reference_hkx() {
         assert_pack_matches_fixture(
             "Billyy_CreatureFurniture",
@@ -274,7 +346,6 @@ mod smoke_tests {
     }
 
     #[test]
-    #[ignore = "requires research/behavior_samples"]
     fn lesbiandd_matches_reference_hkx() {
         assert_pack_matches_fixture(
             "Billyy_HumanLesbianDD",

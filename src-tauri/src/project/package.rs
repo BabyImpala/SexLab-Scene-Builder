@@ -5,7 +5,7 @@ use std::{
     fs,
     io::{BufReader, BufWriter, Write},
     mem::size_of,
-    path::PathBuf,
+    path::{Path, PathBuf},
     vec,
 };
 use tauri_plugin_dialog::DialogExt;
@@ -516,9 +516,12 @@ impl Package {
 
     pub fn build(&self, root_dir: PathBuf) -> Result<(), std::io::Error> {
         println!("Compiling project {}", self.pack_name);
-        self.write_binary_file(&root_dir)?;
-        self.write_fnis_files_slsb(&root_dir)?;
-        self.generate_behaviors(&root_dir)?;
+        self.write_pack_atomically(&root_dir, |staging| {
+            self.write_binary_file(staging)?;
+            self.write_fnis_files_slsb(staging)?;
+            self.generate_behaviors(staging)?;
+            Ok(())
+        })?;
         info!(
             "Successfully compiled {}",
             root_dir.to_str().unwrap_or_default()
@@ -536,11 +539,50 @@ impl Package {
         }
     }
 
+    /// Write pack contents into a sibling staging dir, then swap into `root_dir`
+    /// so a mid-build failure does not leave a half-written destination.
+    fn write_pack_atomically<F>(&self, root_dir: &PathBuf, write: F) -> Result<(), std::io::Error>
+    where
+        F: FnOnce(&PathBuf) -> Result<(), std::io::Error>,
+    {
+        let parent = root_dir.parent().unwrap_or_else(|| Path::new("."));
+        let name = root_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("pack");
+        let staging = parent.join(format!(
+            ".{name}.slsb-staging-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging)?;
+        match write(&staging) {
+            Ok(()) => {
+                if root_dir.exists() {
+                    fs::remove_dir_all(root_dir)?;
+                }
+                fs::rename(&staging, root_dir)?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = fs::remove_dir_all(&staging);
+                Err(e)
+            }
+        }
+    }
+
     pub fn write_slal_pack(&self, root_dir: &PathBuf) -> Result<(), String> {
-        self.write_slal(root_dir)?;
-        self.write_fnis_files_slal(root_dir)?;
-        self.generate_behaviors(root_dir)
-            .map_err(|e| e.to_string())
+        self.write_pack_atomically(root_dir, |staging| {
+            self.write_slal(staging).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, e)
+            })?;
+            self.write_fnis_files_slal(staging).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, e)
+            })?;
+            self.generate_behaviors(staging)?;
+            Ok(())
+        })
+        .map_err(|e| e.to_string())
     }
 
     pub fn write_slal(&self, root_dir: &PathBuf) -> Result<(), String> {
