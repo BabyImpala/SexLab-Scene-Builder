@@ -268,6 +268,8 @@ fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
     let help_menu = SubmenuBuilder::new(app, "Help")
         .text("open_docs", "Open Wiki")
         .separator()
+        .text("about", "About")
+        .separator()
         .text("discord", "Discord")
         .text("patreon", "Patreon")
         .text("kofi", "Ko-Fi")
@@ -342,6 +344,24 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                 "https://slp-community.github.io/SexLab-Wiki/slsb/creating-packs-using-slsb/",
                 Option::<String>::None,
             );
+        }
+        "about" => {
+            let msg = format!(
+                "SexLab Scene Builder {}\n\
+                 Apache-2.0 — Scrab and contributors\n\
+                 https://github.com/SLP-Community/SexLab-Scene-Builder\n\n\
+                 Third-party:\n\
+                 • serde-hkx (MIT OR Apache-2.0) — Behavior.hkx packing\n\
+                   https://github.com/SARDONYX-sard/serde-hkx\n\
+                   Copyright SARDONYX and contributors",
+                env!("CARGO_PKG_VERSION")
+            );
+            app.dialog()
+                .message(msg)
+                .title("About SexLab Scene Builder")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::Ok)
+                .show(|_| {});
         }
         "discord" => {
             let _ = app
