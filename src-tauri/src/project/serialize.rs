@@ -91,30 +91,51 @@ pub fn make_fnis_lines(
     fixed_len: bool,
     anim_obj: &Vec<String>,
 ) -> Vec<String> {
-    if events.len() == 1 {
-        return vec![make_fnis_line(
-            "b",
-            &events[0],
-            hash,
-            if fixed_len { "a,Tn" } else { "" },
-            anim_obj,
-        )];
+    // SexLab P+: singular `b` lines, hash prefixes the event, always -md
+    let opts = slsb_fnis_options(fixed_len, !anim_obj.is_empty());
+    events
+        .iter()
+        .map(|event| make_fnis_line("b", event, hash, &opts, anim_obj))
+        .collect()
+}
+
+fn slsb_fnis_options(fixed_len: bool, has_anim_obj: bool) -> String {
+    match (has_anim_obj, fixed_len) {
+        (false, false) => "md".into(),
+        (false, true) => "md,a,Tn".into(),
+        (true, false) => "o,md".into(),
+        (true, true) => "o,md,a,Tn".into(),
     }
-    let mut ret = vec![];
-    for (i, event) in events.iter().enumerate() {
-        ret.push(make_fnis_line(
-            if i == 0 { "s" } else { "+" },
-            event,
-            hash,
-            if fixed_len && i == events.len() - 1 {
-                "a,Tn"
-            } else {
-                ""
-            },
-            anim_obj,
-        ));
+}
+
+// Classic SexLab / SLAL: ' anim header + s/+ sequence, no pack hash
+pub fn make_fnis_lines_slal_sequence(
+    anim_id: &str,
+    stages: &[(String, Vec<String>, bool)],
+    foot_ik_disable: bool,
+) -> Vec<String> {
+    let mut lines = vec![format!("' {}", anim_id)];
+    for (i, (event, anim_obj, fixed_len)) in stages.iter().enumerate() {
+        let prefix = if i == 0 { "s" } else { "+" };
+        let options = slal_fnis_options(i == 0 && foot_ik_disable, *fixed_len, !anim_obj.is_empty());
+        lines.push(make_fnis_line_slal(prefix, event, &options, anim_obj));
     }
-    ret
+    lines
+}
+
+fn slal_fnis_options(foot_ik_disable: bool, fixed_len: bool, has_anim_obj: bool) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if has_anim_obj {
+        parts.push("o");
+    }
+    if foot_ik_disable {
+        parts.push("AVbHumanoidFootIKDisable");
+    }
+    if fixed_len {
+        parts.push("a");
+        parts.push("Tn");
+    }
+    parts.join(",")
 }
 
 fn make_fnis_line(
@@ -127,15 +148,7 @@ fn make_fnis_line(
     format!(
         "{}{} {}{} {}.hkx{}",
         anim_type,
-        if options.is_empty() && anim_obj.is_empty() {
-            "".into()
-        } else if anim_obj.is_empty() {
-            format!(" -{}", options)
-        } else if options.is_empty() {
-            " -o".into()
-        } else {
-            format!(" -o,{}", options)
-        },
+        fnis_option_token(options),
         hash,
         event,
         event,
@@ -143,6 +156,32 @@ fn make_fnis_line(
             .iter()
             .fold(String::from(""), |acc, x| format!("{} {}", acc, x))
     )
+}
+
+fn make_fnis_line_slal(
+    anim_type: &str,
+    event: &str,
+    options: &str,
+    anim_obj: &Vec<String>,
+) -> String {
+    format!(
+        "{}{} {} {}.hkx{}",
+        anim_type,
+        fnis_option_token(options),
+        event,
+        event,
+        anim_obj
+            .iter()
+            .fold(String::from(""), |acc, x| format!("{} {}", acc, x))
+    )
+}
+
+fn fnis_option_token(options: &str) -> String {
+    if options.is_empty() {
+        String::new()
+    } else {
+        format!(" -{}", options)
+    }
 }
 
 pub trait EncodeBinary {
