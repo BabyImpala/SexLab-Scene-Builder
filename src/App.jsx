@@ -38,6 +38,9 @@ function App() {
   const [scenes, updateScenes] = useImmer([]);
   const [activeScene, updateActiveScene] = useImmer(null);
   const [edited, setEdited] = useState(0);
+  const [cloneToOpen, setCloneToOpen] = useState(false);
+  const [cloneToStage, setCloneToStage] = useState(null);
+  const [cloneToTargetId, setCloneToTargetId] = useState(null);
   const inEdit = useRef(0);
   const [showAreas, setShowAreas] = useState(false);
 
@@ -174,6 +177,11 @@ function App() {
           activeScene: node.prop('scene'),
           copyStage: node.prop('stage'),
         });
+      })
+      .on("node:cloneTo", ({ node }) => {
+        setCloneToStage(node.prop('stage'));
+        setCloneToTargetId(null);
+        setCloneToOpen(true);
       })
 
     setGraph(newGraph);
@@ -682,6 +690,55 @@ function App() {
     }
   }
 
+  const blankStagePosition = () => ({
+    event: [],
+    anim_obj: '',
+    offset: { x: 0, y: 0, z: 0, r: 0 },
+    strip_data: {
+      default: true,
+      everything: false,
+      nothing: false,
+      helmet: false,
+      gloves: false,
+      boots: false,
+    },
+    climax: false,
+    tags: [],
+    schlong: 0,
+    add_cum: 0,
+  });
+
+  const adaptStageToScene = (stage, targetScene) => {
+    const copy = structuredClone(stage);
+    const n = targetScene.positions?.length ?? 0;
+    while (copy.positions.length < n) {
+      copy.positions.push(blankStagePosition());
+    }
+    if (copy.positions.length > n) {
+      copy.positions = copy.positions.slice(0, n);
+    }
+    return copy;
+  };
+
+  const confirmCloneTo = () => {
+    if (!cloneToStage || !cloneToTargetId) return;
+    const target =
+      (activeScene && activeScene.id === cloneToTargetId && activeScene) ||
+      scenes.find((s) => s.id === cloneToTargetId);
+    if (!target) {
+      api.error({ message: 'Target scene not found', placement: 'bottomLeft' });
+      return;
+    }
+    const adapted = adaptStageToScene(cloneToStage, target);
+    invoke('open_stage_editor_from', {
+      activeScene: target,
+      copyStage: adapted,
+    });
+    setCloneToOpen(false);
+    setCloneToStage(null);
+    setCloneToTargetId(null);
+  };
+
   return (
     <ConfigProvider
       theme={{
@@ -701,6 +758,45 @@ function App() {
           {/* Left Panel */}
           <Panel minSize={10} defaultSize={15} maxSize={50} id="left-panel">
             {contextHolder}
+            <Modal
+              title="Clone stage to animation"
+              open={cloneToOpen}
+              onOk={confirmCloneTo}
+              onCancel={() => {
+                setCloneToOpen(false);
+                setCloneToStage(null);
+                setCloneToTargetId(null);
+              }}
+              okButtonProps={{ disabled: !cloneToTargetId }}
+              okText="Clone"
+              destroyOnClose
+            >
+              <p style={{ marginBottom: 12 }}>
+                Open a copy of this stage in another animation. Actor slots are
+                padded or trimmed to match the target.
+              </p>
+              <Select
+                style={{ width: '100%' }}
+                placeholder="Select animation"
+                value={cloneToTargetId}
+                onChange={setCloneToTargetId}
+                options={(() => {
+                  const list = [...scenes];
+                  if (
+                    activeScene &&
+                    !list.some((s) => s.id === activeScene.id)
+                  ) {
+                    list.push(activeScene);
+                  }
+                  return list.map((s) => ({
+                    value: s.id,
+                    label: s.name || s.id || 'Untitled',
+                  }));
+                })()}
+                showSearch
+                optionFilterProp="label"
+              />
+            </Modal>
             <Sider
               className="main-sider"
               collapsible
