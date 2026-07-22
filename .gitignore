@@ -10,7 +10,11 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+dist-test
 *.local
+
+# Local cargo overrides (cross-linkers, etc.)
+.cargo/
 
 # Editor directories and files
 .vscode/*
