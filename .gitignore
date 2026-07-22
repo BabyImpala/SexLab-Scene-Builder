@@ -30,3 +30,6 @@ dist-test
 
 # temp dir for animation processing
 tmp/
+
+# Reference files
+research/*

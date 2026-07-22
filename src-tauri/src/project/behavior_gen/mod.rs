@@ -336,6 +336,7 @@ mod smoke_tests {
     }
 
     #[test]
+    #[ignore = "requires local research/behavior_samples (not in repo)"]
     fn chaurus_matches_reference_hkx() {
         assert_pack_matches_fixture(
             "Billyy_CreatureFurniture",
@@ -346,6 +347,7 @@ mod smoke_tests {
     }
 
     #[test]
+    #[ignore = "requires local research/behavior_samples (not in repo)"]
     fn lesbiandd_matches_reference_hkx() {
         assert_pack_matches_fixture(
             "Billyy_HumanLesbianDD",
@@ -464,6 +466,7 @@ mod smoke_tests {
     }
 
     #[test]
+    #[ignore = "requires local research/behavior_samples (not in repo)"]
     fn lesbiandd_xml_object_order_matches_reference() {
         let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../research/behavior_samples");
         let list = samples.join("pplus_lesbiandd_List.txt");
