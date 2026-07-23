@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Card, Space, InputNumber, Tooltip } from "antd";
 import { useImmer } from "use-immer";
 import CheckboxEx from "../components/CheckboxEx";
@@ -15,9 +15,12 @@ function ScenePosition({ position, onChange }) {
     vampire: position.vampire,
     dead: position.dead,
   });
+  // Ignore the emit that follows prop→local sync (including first mount).
+  const suppressEmit = useRef(true);
 
   // Keep local state in sync when the parent swaps/reloads this slot
   useEffect(() => {
+    suppressEmit.current = true;
     updateSex(position.sex);
     setRace(position.race);
     setScale(typeof position.scale === "number" ? position.scale : 1.0);
@@ -29,6 +32,10 @@ function ScenePosition({ position, onChange }) {
   }, [position.id, position.race, position.scale, position.sex, position.submissive, position.vampire, position.dead]);
 
   useEffect(() => {
+    if (suppressEmit.current) {
+      suppressEmit.current = false;
+      return;
+    }
     onChange({
       ...position,
       sex,

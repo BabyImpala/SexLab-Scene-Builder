@@ -332,7 +332,8 @@ function App() {
               if (idx === -1) prev.push(updatedScene);
               else prev[idx] = updatedScene;
             });
-            setEdited(true);
+            // Do not setEdited(true): the active (source) animation was not
+            // modified. save_scene already marks the project dirty in Rust.
             api.success({
               message: 'Stage cloned',
               description: `Added to “${updatedScene.name || 'Untitled'}”. Open that animation to see it.`,
