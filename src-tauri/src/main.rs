@@ -9,7 +9,7 @@ mod racekeys;
 
 use log::{error, info};
 use once_cell::sync::Lazy;
-use project::{package::Package, position::Position, scene::Scene, stage::Stage, NanoID};
+use project::{package::{ExportKind, Package}, position::Position, scene::Scene, stage::Stage, NanoID};
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -79,6 +79,8 @@ const MAIN_WINDOW: &str = "main_window";
 
 const NEW_PROJECT: &str = "new_prjct";
 const OPEN_PROJECT: &str = "open_prjct";
+const IMPORT_SLAL: &str = "import_slal";
+const ENRICH_SLANIM: &str = "enrich_slanim";
 const DARKMODE: &str = "darkmode";
 
 fn main() {
@@ -107,6 +109,7 @@ fn main() {
                 let res = match command.name.as_str() {
                     "convert" => cli::convert(command.matches.args),
                     "build" => cli::build(command.matches.args),
+                    "export-slal" => cli::export_slal(command.matches.args),
                     _ => Err(format!("Unrecognized subcommand: {}", command.name)),
                 }
                 .map_err(|e| {
@@ -124,7 +127,7 @@ fn main() {
             )
             .title(DEFAULT_MAINWINDOW_TITLE)
             .menu(get_menu(&app.app_handle()).expect("Failed to create menu"))
-            .min_inner_size(960.0, 540.0)
+            .min_inner_size(800.0, 500.0)
             .inner_size(1280.0, 720.0)
             .build()
             .expect("Failed to create main window")
@@ -144,10 +147,19 @@ fn reload_project(reload_type: &str, window: &tauri::WebviewWindow) {
             Ok(())
         }
         OPEN_PROJECT => prjct.load_project(window.app_handle()),
+        IMPORT_SLAL => prjct.load_slal(window.app_handle()),
         _ => Err(format!("Invalid reload type: {}", reload_type)),
     };
     if let Err(e) = result {
         error!("{}", e);
+        window
+            .app_handle()
+            .dialog()
+            .message(&e)
+            .title("Load failed")
+            .kind(MessageDialogKind::Error)
+            .buttons(MessageDialogButtons::Ok)
+            .show(|_| {});
         return;
     }
     if prjct.pack_name == String::default() {
@@ -156,6 +168,8 @@ fn reload_project(reload_type: &str, window: &tauri::WebviewWindow) {
         let _ = window
             .set_title(format!("{} - {}", DEFAULT_MAINWINDOW_TITLE, prjct.pack_name).as_str());
     }
+    // Import leaves an unsaved in-memory project until Save As
+    set_edited(reload_type == IMPORT_SLAL);
     window.emit("on_project_update", &prjct.scenes).unwrap();
 }
 
@@ -176,6 +190,20 @@ fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
                 true,
                 "cmdOrControl+O".into(),
             )?,
+            &MenuItem::with_id(
+                app,
+                IMPORT_SLAL,
+                "Import SLAL...",
+                true,
+                Option::<&str>::None,
+            )?,
+            &MenuItem::with_id(
+                app,
+                ENRICH_SLANIM,
+                "Enrich from SLAnim source...",
+                true,
+                Option::<&str>::None,
+            )?,
         ])
         .separator()
         .items(&[
@@ -194,8 +222,35 @@ fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
                 true,
                 "cmdOrControl+Shift+S".into(),
             )?,
-            &MenuItem::with_id(app, "build", "Export", true, "cmdOrControl+B".into())?,
         ])
+        .separator()
+        .item(
+            &SubmenuBuilder::new(app, "Export")
+                .items(&[
+                    &MenuItem::with_id(
+                        app,
+                        "export_both",
+                        "SLSB + SLAL...",
+                        true,
+                        "cmdOrControl+B".into(),
+                    )?,
+                    &MenuItem::with_id(
+                        app,
+                        "export_slsb",
+                        "SLSB only...",
+                        true,
+                        Option::<&str>::None,
+                    )?,
+                    &MenuItem::with_id(
+                        app,
+                        "export_slal",
+                        "SLAL only...",
+                        true,
+                        Option::<&str>::None,
+                    )?,
+                ])
+                .build()?,
+        )
         .separator()
         .quit()
         .build()?;
@@ -224,13 +279,18 @@ fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
 
 fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().0.as_str() {
-        NEW_PROJECT | OPEN_PROJECT => {
+        NEW_PROJECT | OPEN_PROJECT | IMPORT_SLAL => {
             let event_id = event.id().0.clone();
             let window = app.get_webview_window(MAIN_WINDOW).unwrap();
+            let title = match event_id.as_str() {
+                NEW_PROJECT => "New Project",
+                OPEN_PROJECT => "Open Project",
+                _ => "Import SLAL",
+            };
             if get_edited() {
                 app.dialog()
                     .message("There are unsaved changes. Loading a new project will cause these changes to be lost.\nContinue?")
-                    .title(if event_id == NEW_PROJECT {"New Project"} else {"Open Project"})
+                    .title(title)
                     .buttons(MessageDialogButtons::YesNo)
                     .kind(MessageDialogKind::Warning)
                     .show(move |result| match result {
@@ -252,10 +312,21 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
             let _ = window
                 .set_title(format!("{} - {}", DEFAULT_MAINWINDOW_TITLE, prjct.pack_name).as_str());
         }
-        "build" => {
+        "export_both" | "export_slsb" | "export_slal" => {
+            let kind = match event.id().0.as_str() {
+                "export_slsb" => ExportKind::Slsb,
+                "export_slal" => ExportKind::Slal,
+                _ => ExportKind::Both,
+            };
             let prjct = PROJECT.lock().unwrap();
-            if let Err(err) = prjct.export(app) {
-                error!("Failed to build project: {}", err);
+            if let Err(err) = prjct.export_as(app, kind) {
+                error!("Failed to export project: {}", err);
+                app.dialog()
+                    .message(&err)
+                    .title("Export failed")
+                    .kind(MessageDialogKind::Error)
+                    .buttons(MessageDialogButtons::Ok)
+                    .show(|_| {});
             }
         }
         DARKMODE => {
@@ -267,7 +338,7 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         }
         "open_docs" => {
             let _ = app.opener().open_url(
-                "https://github.com/Scrabx3/SexLab/wiki/Scene-Builder",
+                "https://slp-community.github.io/SexLab-Wiki/slsb/creating-packs-using-slsb/",
                 Option::<String>::None,
             );
         }
@@ -291,6 +362,36 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
             let mut prjct = PROJECT.lock().unwrap();
             if let Err(err) = prjct.import_offset(app) {
                 error!("{}", err);
+            }
+        }
+        ENRICH_SLANIM => {
+            let mut prjct = PROJECT.lock().unwrap();
+            match prjct.enrich_from_slanim_source(app) {
+                Ok(summary) => {
+                    set_edited(true);
+                    let window = app.get_webview_window(MAIN_WINDOW).unwrap();
+                    window.emit("on_project_update", &prjct.scenes).unwrap();
+                    let kind = if summary.positions_updated > 0 {
+                        MessageDialogKind::Info
+                    } else {
+                        MessageDialogKind::Warning
+                    };
+                    app.dialog()
+                        .message(summary.message())
+                        .title("Enrich from SLAnim source")
+                        .kind(kind)
+                        .buttons(MessageDialogButtons::Ok)
+                        .show(|_| {});
+                }
+                Err(err) => {
+                    error!("{}", err);
+                    app.dialog()
+                        .message(&err)
+                        .title("Enrich failed")
+                        .kind(MessageDialogKind::Error)
+                        .buttons(MessageDialogButtons::Ok)
+                        .show(|_| {});
+                }
             }
         }
         _ => {
@@ -393,13 +494,19 @@ struct EditorPayload {
 
 fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: EditorPayload) {
     let stage = &payload.stage;
+    let label = format!("stage_editor_{}", stage.id.0);
     info!(
         "Opening Stage {} from Scene {}",
         stage.id.0, payload.scene.0
     );
-    let window = WebviewWindowBuilder::new(
+    // Reopening the same stage must focus the existing window (labels are unique)
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.set_focus();
+        return;
+    }
+    let window = match WebviewWindowBuilder::new(
         app,
-        format!("stage_editor_{}", stage.id.0),
+        label,
         tauri::WebviewUrl::App("./stage.html".into()),
     )
     .title(format!(
@@ -410,16 +517,24 @@ fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: Editor
             stage.name.as_str()
         }
     ))
-    .min_inner_size(800.0, 600.0)
+    .min_inner_size(720.0, 540.0)
     .inner_size(1152.0, 864.0)
     .resizable(true)
     .build()
-    .expect(&format!(
-        "Failed to create stage editor window for Stage {}",
-        stage.id.0
-    ));
+    {
+        Ok(w) => w,
+        Err(e) => {
+            error!(
+                "Failed to create stage editor window for Stage {}: {}",
+                stage.id.0, e
+            );
+            return;
+        }
+    };
     window.clone().once("on_request_data", move |_| {
-        window.emit("on_data_received", payload.clone()).unwrap();
+        if let Err(e) = window.emit("on_data_received", payload.clone()) {
+            error!("Failed to send stage editor payload: {}", e);
+        }
     });
 }
 
@@ -445,11 +560,17 @@ async fn open_stage_editor_from<R: Runtime>(
     active_scene: Scene,
     copy_stage: Stage,
 ) -> () {
+    // Clone must get a fresh id so save inserts a new stage instead of overwriting the source
+    let mut stage = copy_stage;
+    stage.id = NanoID::new_nanoid();
+    if !stage.name.is_empty() {
+        stage.name = format!("{} (Copy)", stage.name);
+    }
     open_stage_editor_impl(
         &app,
         EditorPayload {
             scene: active_scene.id.clone(),
-            stage: copy_stage.clone(),
+            stage,
             positions: active_scene.positions.clone(),
         },
     );

@@ -33,10 +33,10 @@ pub fn build(
 ) -> Result<(), String> {
   let in_path = match &args.get("in").unwrap().value {
       serde_json::Value::String(value) => PathBuf::from(value),
-      _ => return Err("input slal file not provided".to_string()),
+      _ => return Err("input project file not provided".to_string()),
   };
   if !in_path.exists() || !in_path.is_file() || in_path.extension().unwrap() != "json" {
-      return Err("input slal file is invalid".to_string());
+      return Err("input project file is invalid".to_string());
   }
 
   let out_dir = match &args.get("out").unwrap().value {
@@ -49,5 +49,38 @@ pub fn build(
 
   let file = std::fs::File::open(&in_path).map_err(|e| e.to_string())?;
   let project = Package::from_file(file)?;
-  project.build(out_dir).map_err(|e| e.to_string())
+  let with_slal = args
+    .get("slal")
+    .map(|a| matches!(a.value, serde_json::Value::Bool(true)))
+    .unwrap_or(false);
+
+  project.build(out_dir.clone()).map_err(|e| e.to_string())?;
+  if with_slal {
+    project.write_slal_pack(&out_dir.join("SLAL"))?;
+  }
+  Ok(())
+}
+
+pub fn export_slal(
+  args: std::collections::HashMap<String, tauri_plugin_cli::ArgData>,
+) -> Result<(), String> {
+  let in_path = match &args.get("in").unwrap().value {
+      serde_json::Value::String(value) => PathBuf::from(value),
+      _ => return Err("input project file not provided".to_string()),
+  };
+  if !in_path.exists() || !in_path.is_file() || in_path.extension().unwrap() != "json" {
+      return Err("input project file is invalid".to_string());
+  }
+
+  let out_dir = match &args.get("out").unwrap().value {
+      serde_json::Value::String(value) => PathBuf::from(value),
+      _ => return Err("output dir not provided".to_string()),
+  };
+  if !out_dir.exists() || !out_dir.is_dir() {
+      return Err("output dir is invalid".to_string());
+  }
+
+  let file = std::fs::File::open(&in_path).map_err(|e| e.to_string())?;
+  let project = Package::from_file(file)?;
+  project.write_slal_pack(&out_dir)
 }

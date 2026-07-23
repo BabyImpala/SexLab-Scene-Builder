@@ -12,6 +12,9 @@ pub struct PositionInfo {
     pub submissive: bool,
     pub vampire: bool,
     pub dead: bool,
+    /// SLAL actor add_cum bitfield (JSON project only; not in .slr binary)
+    #[serde(default)]
+    pub add_cum: i32,
 }
 
 impl EncodeBinary for PositionInfo {
@@ -43,6 +46,7 @@ impl Default for PositionInfo {
             submissive: false,
             vampire: false,
             dead: false,
+            add_cum: 0,
         }
     }
 }

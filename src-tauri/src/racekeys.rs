@@ -57,64 +57,78 @@ pub enum RaceKey {
     Wolf,
 }
 
+const LEGACY_RACEKEY_PAIRS: &[(&str, &str)] = &[
+    ("Humans", "Human"),
+    ("Ashhoppers", "Ash Hopper"),
+    ("Bears", "Bear"),
+    ("BoarsAny", "Boar"),
+    ("BoarsMounted", "Boar (Any)"),
+    ("Boars", "Boar (Mounted)"),
+    ("Canines", "Canine"),
+    ("Chaurus", "Chaurus"),
+    ("ChaurusHunters", "Chaurus Hunter"),
+    ("ChaurusReapers", "Chaurus Reaper"),
+    ("Chickens", "Chicken"),
+    ("Cows", "Cow"),
+    ("Deers", "Deer"),
+    ("Dogs", "Dog"),
+    ("Dragons", "Dragon"),
+    ("DragonPriests", "Dragon Priest"),
+    ("Draugrs", "Draugr"),
+    ("DwarvenBallistas", "Dwarven Ballista"),
+    ("DwarvenCenturions", "Dwarven Centurion"),
+    ("DwarvenSpheres", "Dwarven Sphere"),
+    ("DwarvenSpiders", "Dwarven Spider"),
+    ("Falmers", "Falmer"),
+    ("FlameAtronach", "Flame Atronach"),
+    ("Foxes", "Fox"),
+    ("FrostAtronach", "Frost Atronach"),
+    ("Gargoyles", "Gargoyle"),
+    ("Giants", "Giant"),
+    ("GiantSpiders", "Giant Spider"),
+    ("Goats", "Goat"),
+    ("Hagravens", "Hagraven"),
+    ("Rabbits", "Rabbit"),
+    ("Horkers", "Horker"),
+    ("Horses", "Horse"),
+    ("IceWraiths", "Ice Wraith"),
+    ("LargeSpiders", "Large Spider"),
+    ("Lurkers", "Lurker"),
+    ("Mammoths", "Mammoth"),
+    ("Mudcrabs", "Mudcrab"),
+    ("Netches", "Netch"),
+    ("Rieklings", "Riekling"),
+    ("Sabrecats", "Sabrecat"),
+    ("Seekers", "Seeker"),
+    ("Skeevers", "Skeever"),
+    ("Slaughterfishes", "Slaughterfish"),
+    ("Spiders", "Spider"),
+    ("Spriggans", "Spriggan"),
+    ("StormAtronach", "Storm Atronach"),
+    ("Trolls", "Troll"),
+    ("VampireLords", "Vampire Lord"),
+    ("Werewolves", "Werewolf"),
+    ("Wisps", "Wisp"),
+    ("Wispmothers", "Wispmother"),
+    ("Wolves", "Wolf"),
+];
+
 pub fn map_legacy_to_racekey(legacykey: &str) -> Result<String, String> {
     let key = legacykey.to_lowercase();
-    match key.as_str() {
-        "humans" => Ok("Human".into()),
-        "ashhoppers" => Ok("Ash Hopper".into()),
-        "bears" => Ok("Bear".into()),
-        "boarsany" => Ok("Boar".into()),
-        "boarsmounted" => Ok("Boar (Any)".into()),
-        "boars" => Ok("Boar (Mounted)".into()),
-        "canines" => Ok("Canine".into()),
-        "chaurus" => Ok("Chaurus".into()),
-        "chaurushunters" => Ok("Chaurus Hunter".into()),
-        "chaurusreapers" => Ok("Chaurus Reaper".into()),
-        "chickens" => Ok("Chicken".into()),
-        "cows" => Ok("Cow".into()),
-        "deers" => Ok("Deer".into()),
-        "dogs" => Ok("Dog".into()),
-        "dragons" => Ok("Dragon".into()),
-        "dragonpriests" => Ok("Dragon Priest".into()),
-        "draugrs" => Ok("Draugr".into()),
-        "dwarvenballistas" => Ok("Dwarven Ballista".into()),
-        "dwarvencenturions" => Ok("Dwarven Centurion".into()),
-        "dwarvenspheres" => Ok("Dwarven Sphere".into()),
-        "dwarvenspiders" => Ok("Dwarven Spider".into()),
-        "falmers" => Ok("Falmer".into()),
-        "flameatronach" => Ok("Flame Atronach".into()),
-        "foxes" => Ok("Fox".into()),
-        "frostatronach" => Ok("Frost Atronach".into()),
-        "gargoyles" => Ok("Gargoyle".into()),
-        "giants" => Ok("Giant".into()),
-        "giantspiders" => Ok("Giant Spider".into()),
-        "goats" => Ok("Goat".into()),
-        "hagravens" => Ok("Hagraven".into()),
-        "rabbits" => Ok("Rabbit".into()),
-        "horkers" => Ok("Horker".into()),
-        "horses" => Ok("Horse".into()),
-        "icewraiths" => Ok("Ice Wraith".into()),
-        "largespiders" => Ok("Large Spider".into()),
-        "lurkers" => Ok("Lurker".into()),
-        "mammoths" => Ok("Mammoth".into()),
-        "mudcrabs" => Ok("Mudcrab".into()),
-        "netches" => Ok("Netch".into()),
-        "rieklings" => Ok("Riekling".into()),
-        "sabrecats" => Ok("Sabrecat".into()),
-        "seekers" => Ok("Seeker".into()),
-        "skeevers" => Ok("Skeever".into()),
-        "slaughterfishes" => Ok("Slaughterfish".into()),
-        "spiders" => Ok("Spider".into()),
-        "spriggans" => Ok("Spriggan".into()),
-        "stormatronach" => Ok("Storm Atronach".into()),
-        "trolls" => Ok("Troll".into()),
-        "vampirelords" => Ok("Vampire Lord".into()),
-        "werewolves" => Ok("Werewolf".into()),
-        "wisps" => Ok("Wisp".into()),
-        "wispmothers" => Ok("Wispmother".into()),
-        "wolves" => Ok("Wolf".into()),
-        _ => Err(format!("Unrecognized legacy key: {}", legacykey).into()),
-    }
+    LEGACY_RACEKEY_PAIRS
+        .iter()
+        .find(|(legacy, _)| legacy.to_lowercase() == key)
+        .map(|(_, racekey)| (*racekey).into())
+        .ok_or_else(|| format!("Unrecognized legacy key: {}", legacykey))
+}
+
+/// Reverse of [`map_legacy_to_racekey`].
+pub fn map_racekey_to_legacy(racekey: &str) -> Result<String, String> {
+    LEGACY_RACEKEY_PAIRS
+        .iter()
+        .find(|(_, rk)| *rk == racekey)
+        .map(|(legacy, _)| (*legacy).into())
+        .ok_or_else(|| format!("Unrecognized race key for SLAL export: {}", racekey))
 }
 
 fn get_race_map() -> HashMap<String, RaceKey> {

@@ -1,10 +1,10 @@
 [package]
 name = "scene_builder"
 version = "2.0.0"
-description = "Tool to create SLP+ animation packs"
-authors = ["Scrab, I unpause"]
-license = ""
-repository = ""
+description = "Tool to create SexLab P+ animation packs"
+authors = ["Scrab", "I unpause", "Miss Corruption"]
+license = "Apache-2.0"
+repository = "https://github.com/SLP-Community/SexLab-Scene-Builder"
 edition = "2021"
 rust-version = "1.75.0"
 

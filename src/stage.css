@@ -89,10 +89,6 @@ body {
   width: 80%;
 }
 
-.ant-dropdown-hidden {
-  display: block !important;
-}
-
 /* Animation and Extras */
 ul[overlayclassname="test12334"] {
   height: fit-content;
