@@ -158,6 +158,7 @@ function App() {
         setEdited(true);
       })
       .on("node:moved", ({ e, x, y, node, view }) => {
+        if (inEdit.current) return;
         const box = node.getBBox();
         const views = newGraph.findViewsInArea(box);
         views.forEach(it => {
@@ -175,6 +176,7 @@ function App() {
         setEdited(true);
       })
       .on("edge:connected", (e) => {
+        if (inEdit.current) return;
         setEdited(true);
       })
       // Custom Events
@@ -532,8 +534,12 @@ function App() {
     } else {
       graph.centerContent();
     }
-    inEdit.current = false;
     setEdited(false);
+    // Keep inEdit through any deferred layout/move events from zoom/center.
+    requestAnimationFrame(() => {
+      inEdit.current = false;
+      setEdited(false);
+    });
   }
 
   const gridSize = 200;
