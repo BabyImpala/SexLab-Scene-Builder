@@ -54,6 +54,7 @@ function StageNode({ node, graph }) {
   const contextItems = [
     makeMenuItem('Edit', 'edit'),
     makeMenuItem('Clone', 'clone'),
+    makeMenuItem('Clone to…', 'cloneto'),
     { type: "divider" },
     makeMenuItem('Mark as root', 'makeroot',),
     makeMenuItem('Remove connections', 'removeconnections'),
@@ -69,6 +70,10 @@ function StageNode({ node, graph }) {
     graph.emit("node:clone", { node });
   }
 
+  const cloneStageTo = () => {
+    graph.emit("node:cloneTo", { node });
+  }
+
   const onContextSelect = ({ key, keyPath, domEvent }) => {
     switch (key) {
       case 'edit':
@@ -76,6 +81,9 @@ function StageNode({ node, graph }) {
         break;
       case 'clone':
         cloneStage();
+        break;
+      case 'cloneto':
+        cloneStageTo();
         break;
       case 'makeroot':
         graph.emit("node:doMarkRoot", { node });

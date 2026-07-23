@@ -192,7 +192,7 @@ function PositionField({ position, info, onChange }) {
             extra={
               <Tooltip className="tool-tip"
                 title={
-                  'The anim object/s associated with this position. If multiple, separate with commas (,)'
+                  'The anim object(s) associated with this position. Separate multiple with commas or spaces (FNIS-style).'
                 }
               >
                 <Button type="link">Info</Button>
@@ -200,9 +200,13 @@ function PositionField({ position, info, onChange }) {
             }
           >
             <Input
-              value={position.anim_obj}
+              value={
+                Array.isArray(position.anim_obj)
+                  ? position.anim_obj.filter(Boolean).join(' ')
+                  : (position.anim_obj ?? '')
+              }
               onChange={(e) => {
-                onChange({ ...position, anim_obj: [e.target.value] }, info)
+                onChange({ ...position, anim_obj: e.target.value }, info)
               }}
               placeholder="Editor ID"
             />
@@ -329,14 +333,14 @@ function PositionField({ position, info, onChange }) {
             <InputNumber
               addonBefore={'Factor'}
               controls
-              decimalSeparator=","
+              decimalSeparator="."
               precision={2}
               min={0.01}
               max={2}
               step={0.01}
               value={info.scale}
               onChange={(e) => {
-                onChange(position, { ...info, scale: e });
+                onChange(position, { ...info, scale: typeof e === 'number' ? e : 1.0 });
               }}
               placeholder="1.0"
             />

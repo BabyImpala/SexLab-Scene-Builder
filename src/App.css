@@ -198,6 +198,7 @@ h3, h4, h5 { font-size: 1.2em; }
 .scene-positions-list {
   display: flex;
   flex-wrap: wrap;
+  width: 100%;
 }
 .scene-positions-list .ant-col {
   flex: 1 1 320px;
@@ -207,30 +208,43 @@ h3, h4, h5 { font-size: 1.2em; }
   padding: .5em;
 }
 
-.scene-positions-list .ant-card-body > div {
-  display: flex;
-  flex-wrap: nowrap;
-  flex-direction: row;
-  justify-content: center;
-  align-items: center;
-  gap: .5em;
+.scene-position-card .ant-card-body {
+  padding: 12px;
 }
 
-.scene-positions-list .ant-card-body > div .ant-space-item {
-  align-items: center; 
-  box-sizing: border-box;
+.scene-position-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75em 1em;
 }
-.scene-positions-list .ant-card-body > div > .ant-space-item:nth-of-type(2),
-.scene-positions-list .ant-card-body > div > .ant-space-item:nth-of-type(4) {
-  background-color: #f0f0f0;
-  width: 2px;
+
+.scene-position-section {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5em;
 }
-/* add warpping to main window postion area at smaller size to prevent side scrolling */
+
+.scene-position-divider {
+  width: 1px;
+  align-self: stretch;
+  min-height: 1.75em;
+  background: rgba(128, 128, 128, 0.35);
+}
+
+.scene-position-scale {
+  flex: 0 0 auto;
+}
+
+.scene-position-scale-label {
+  font-size: 12px;
+  opacity: 0.75;
+  margin-right: 0.25em;
+}
+
 @media (max-width: 1000px) {
-  .scene-positions-list .ant-card-body > div{
-    flex-wrap: wrap;
-  }
-  .scene-positions-list .ant-card-body>div>.ant-space-item:nth-of-type(4) {
+  .scene-position-divider {
     display: none;
   }
 }

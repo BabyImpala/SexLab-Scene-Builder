@@ -38,8 +38,17 @@ function App() {
   const [scenes, updateScenes] = useImmer([]);
   const [activeScene, updateActiveScene] = useImmer(null);
   const [edited, setEdited] = useState(0);
+  const [cloneToOpen, setCloneToOpen] = useState(false);
+  const [cloneToStage, setCloneToStage] = useState(null);
+  const [cloneToSourceScene, setCloneToSourceScene] = useState(null);
+  const [cloneToTargetId, setCloneToTargetId] = useState(null);
   const inEdit = useRef(0);
   const [showAreas, setShowAreas] = useState(false);
+  const activeSceneRef = useRef(null);
+
+  useEffect(() => {
+    activeSceneRef.current = activeScene;
+  }, [activeScene]);
 
   // Hide Areas when sidebar is collapsed
   useEffect(() => {
@@ -169,11 +178,31 @@ function App() {
         setEdited(true);
       })
       .on("node:clone", ({ node }) => {
-        // Tauri maps copy_stage → copyStage; passing `stage` makes the invoke fail
+        // Prefer live scene/stage data — node props go stale when actors are
+        // added/removed from another stage editor in the same animation.
+        const live = activeSceneRef.current;
+        const belonging = node.prop('scene');
+        const scene =
+          live && belonging && live.id === belonging.id ? live : belonging;
+        const stage =
+          scene?.stages?.find((s) => s.id === node.id) || node.prop('stage');
         invoke('open_stage_editor_from', {
-          activeScene: node.prop('scene'),
-          copyStage: node.prop('stage'),
+          activeScene: scene,
+          copyStage: stage,
         });
+      })
+      .on("node:cloneTo", ({ node }) => {
+        const live = activeSceneRef.current;
+        const belonging = node.prop('scene');
+        const sourceScene =
+          live && belonging && live.id === belonging.id ? live : belonging;
+        const stage =
+          sourceScene?.stages?.find((s) => s.id === node.id) ||
+          node.prop('stage');
+        setCloneToStage(stage);
+        setCloneToSourceScene(sourceScene);
+        setCloneToTargetId(null);
+        setCloneToOpen(true);
       })
 
     setGraph(newGraph);
@@ -189,7 +218,11 @@ function App() {
     if (!graph) return;
 
     const editStage = (node) => {
-      let stage = node.prop('stage');
+      // Live stage from activeScene — node.prop('stage') lags when actors are
+      // added via another stage in this animation.
+      let stage =
+        activeScene?.stages?.find((s) => s.id === node.id) ||
+        node.prop('stage');
       console.log("Editing stage", stage, "in scene", activeScene);
 
       console.assert(activeScene.stages.findIndex(it => it.id === stage.id) > -1, "Editing stage that does not belong to active scene: ", stage, activeScene);
@@ -215,46 +248,106 @@ function App() {
     const stage_save = listen('on_stage_saved', (event) => {
       const { scene, positions, stage } = event.payload;
       console.log("Saving new stage in ", scene, positions, stage);
-      const updatingActiveScene = scenes.length === 0 || activeScene.id === scene;
-      let updatedScene = undefined, updatedSceneIdx = undefined, node = undefined;
+      const sceneId = typeof scene === 'string' ? scene : scene?.id ?? scene;
+      const updatingActiveScene =
+        scenes.length === 0 || activeScene?.id === sceneId;
+      let updatedScene = undefined;
+      let updatedSceneIdx = -1;
+      let node = undefined;
       if (updatingActiveScene) {
         const nodes = graph.getNodes();
-        node = nodes.find(node => node.id === stage.id);
+        node = nodes.find((n) => n.id === stage.id);
         if (!node) node = addStageToGraph(stage);
         updateNodeProps(stage, node, activeScene);
         updatedScene = activeScene;
       } else {
-        updatedSceneIdx = scenes.findIndex(it => it.id === scene);
+        updatedSceneIdx = scenes.findIndex((it) => it.id === sceneId);
         if (updatedSceneIdx === -1) {
-          console.error("Scene not found in scenes list", scene, scenes);
-          return;
+          // Destination missing from the sidebar list (e.g. created but never
+          // flushed). Still accept the clone using the editor payload.
+          console.warn(
+            'Scene not in list; creating from clone payload',
+            sceneId,
+            scenes
+          );
+          updatedScene = {
+            id: sceneId,
+            name: '',
+            stages: [],
+            root: stage.id,
+            graph: {},
+            furniture: {
+              enabled: false,
+              id: '',
+              offset: { x: 0, y: 0, z: 0, r: 0 },
+            },
+            private: false,
+            tags: [],
+            positions: [],
+            has_warnings: false,
+          };
+        } else {
+          updatedScene = scenes[updatedSceneIdx];
         }
-        updatedScene = scenes[updatedSceneIdx];
       }
       updatedScene = structuredClone(updatedScene);
-      let editedStageIdx = updatedScene.stages?.findIndex(it => it.id === stage.id) ?? -1;
+      let editedStageIdx =
+        updatedScene.stages?.findIndex((it) => it.id === stage.id) ?? -1;
       if (editedStageIdx === -1) {
-        // Stage is new, add it to the scene
         updatedScene.stages = updatedScene.stages || [];
         updatedScene.stages.push(stage);
         if (updatedScene.stages.length === 1) {
-          // If this is the first stage, set it as the start stage
           if (node) node.prop('isStart', true);
           updatedScene.root = stage.id;
         }
+        // Always ensure graph placement for non-active destinations (and for
+        // active ones the X6 node already exists).
+        if (!updatingActiveScene) {
+          const g = { ...(updatedScene.graph || {}) };
+          if (!g[stage.id]) {
+            const count = Object.keys(g).length;
+            g[stage.id] = {
+              dest: [],
+              x: 40 + (count % 4) * 220,
+              y: 40 + Math.floor(count / 4) * 140,
+            };
+          }
+          updatedScene.graph = g;
+          if (!updatedScene.root) {
+            updatedScene.root = stage.id;
+          }
+        }
       } else {
-        // Stage already exists, update it
         updatedScene.stages[editedStageIdx] = stage;
       }
-      // Update positions
       updatedScene.positions = positions;
       if (updatingActiveScene) {
         updateActiveScene(updatedScene);
         setEdited(true);
       } else {
-        updateScenes(prev => {
-          prev[updatedSceneIdx] = updatedScene;
-        });
+        invoke('save_scene', { scene: updatedScene })
+          .then(() => {
+            updateScenes((prev) => {
+              const idx = prev.findIndex((s) => s.id === updatedScene.id);
+              if (idx === -1) prev.push(updatedScene);
+              else prev[idx] = updatedScene;
+            });
+            // Do not setEdited(true): the active (source) animation was not
+            // modified. save_scene already marks the project dirty in Rust.
+            api.success({
+              message: 'Stage cloned',
+              description: `Added to “${updatedScene.name || 'Untitled'}”. Open that animation to see it.`,
+              placement: 'bottomLeft',
+            });
+          })
+          .catch((err) => {
+            console.error(err);
+            api.error({
+              message: 'Failed to save cloned stage',
+              description: String(err),
+              placement: 'bottomLeft',
+            });
+          });
       }
     });
     const position_remove = listen('on_position_remove', (event) => {
@@ -387,8 +480,12 @@ function App() {
     inEdit.current = true;
     graph.clearCells();
     updateActiveScene(newscene);
-    for (const [key, { x, y }] of Object.entries(newscene.graph)) {
-      const stage = newscene.stages.find(stage => stage.id === key);
+    for (const [key, { x, y }] of Object.entries(newscene.graph || {})) {
+      const stage = newscene.stages.find((s) => s.id === key);
+      if (!stage) {
+        console.warn('Graph references missing stage', key, newscene);
+        continue;
+      }
       const node = addStageToGraph(stage, x, y);
       updateNodeProps(stage, node, newscene);
     }
@@ -646,9 +743,23 @@ function App() {
     const scene = scenes.find(scene => scene.id === id);
     switch (option) {
       case 'add':
-        const new_anim = await invoke('create_blank_scene');
-        setActiveScene(new_anim);
-        setShowAreas(true);
+        {
+          const new_anim = await invoke('create_blank_scene');
+          // Register immediately so Clone-to / sidebar can find it even before
+          // the user saves from the scene editor.
+          try {
+            await invoke('save_scene', { scene: new_anim });
+            updateScenes((prev) => {
+              if (prev.some((s) => s.id === new_anim.id)) return;
+              prev.push(new_anim);
+            });
+          } catch (err) {
+            console.error('Failed to register new scene', err);
+          }
+          setActiveScene(new_anim);
+          setShowAreas(true);
+          setEdited(true);
+        }
         break;
       case 'editanim':
         setActiveScene(scene);
@@ -682,6 +793,94 @@ function App() {
     }
   }
 
+  const blankStagePosition = () => ({
+    event: [],
+    anim_obj: '',
+    offset: { x: 0, y: 0, z: 0, r: 0 },
+    strip_data: {
+      default: true,
+      everything: false,
+      nothing: false,
+      helmet: false,
+      gloves: false,
+      boots: false,
+    },
+    climax: false,
+    tags: [],
+    schlong: 0,
+    add_cum: 0,
+  });
+
+  const blankPositionInfo = () => ({
+    sex: { male: true, female: false, futa: false },
+    race: 'Human',
+    scale: 1.0,
+    submissive: false,
+    vampire: false,
+    dead: false,
+    add_cum: 0,
+    id: generatePositionId(),
+  });
+
+  // Clone-to always keeps the source stage's actor count. Destination
+  // PositionInfo slots are taken from the source scene (falling back to the
+  // target, then blanks) — never shrink a 3-actor stage into a 1-actor anim.
+  const prepareCloneToTarget = (stage, sourceScene, targetScene) => {
+    const adaptedStage = structuredClone(stage);
+    const target = structuredClone(targetScene);
+    const sourceInfos = sourceScene?.positions || [];
+    const n = adaptedStage.positions?.length ?? 0;
+    const nextInfos = [];
+    for (let i = 0; i < n; i++) {
+      const fromSource = sourceInfos[i];
+      const fromTarget = target.positions?.[i];
+      if (fromSource) {
+        nextInfos.push({
+          ...structuredClone(fromSource),
+          id: generatePositionId(),
+        });
+      } else if (fromTarget) {
+        nextInfos.push({
+          ...structuredClone(fromTarget),
+          id: fromTarget.id || generatePositionId(),
+        });
+      } else {
+        nextInfos.push(blankPositionInfo());
+      }
+    }
+    target.positions = nextInfos;
+    return { adaptedStage, target };
+  };
+
+  const confirmCloneTo = () => {
+    if (!cloneToStage || !cloneToTargetId) return;
+    const target =
+      (activeScene && activeScene.id === cloneToTargetId && activeScene) ||
+      scenes.find((s) => s.id === cloneToTargetId);
+    if (!target) {
+      api.error({ message: 'Target scene not found', placement: 'bottomLeft' });
+      return;
+    }
+    // Prefer the live source stage from the source scene (actor count may have
+    // changed after the modal opened).
+    const sourceStage =
+      cloneToSourceScene?.stages?.find((s) => s.id === cloneToStage.id) ||
+      cloneToStage;
+    const { adaptedStage, target: targetWithActors } = prepareCloneToTarget(
+      sourceStage,
+      cloneToSourceScene,
+      target
+    );
+    invoke('open_stage_editor_from', {
+      activeScene: targetWithActors,
+      copyStage: adaptedStage,
+    });
+    setCloneToOpen(false);
+    setCloneToStage(null);
+    setCloneToSourceScene(null);
+    setCloneToTargetId(null);
+  };
+
   return (
     <ConfigProvider
       theme={{
@@ -701,6 +900,47 @@ function App() {
           {/* Left Panel */}
           <Panel minSize={10} defaultSize={15} maxSize={50} id="left-panel">
             {contextHolder}
+            <Modal
+              title="Clone stage to animation"
+              open={cloneToOpen}
+              onOk={confirmCloneTo}
+              onCancel={() => {
+                setCloneToOpen(false);
+                setCloneToStage(null);
+                setCloneToSourceScene(null);
+                setCloneToTargetId(null);
+              }}
+              okButtonProps={{ disabled: !cloneToTargetId }}
+              okText="Clone"
+              destroyOnClose
+            >
+              <p style={{ marginBottom: 12 }}>
+                Open a copy of this stage in another animation. The cloned stage
+                keeps this stage&apos;s actor count; the destination animation
+                is expanded to match.
+              </p>
+              <Select
+                style={{ width: '100%' }}
+                placeholder="Select animation"
+                value={cloneToTargetId}
+                onChange={setCloneToTargetId}
+                options={(() => {
+                  const list = [...scenes];
+                  if (
+                    activeScene &&
+                    !list.some((s) => s.id === activeScene.id)
+                  ) {
+                    list.push(activeScene);
+                  }
+                  return list.map((s) => ({
+                    value: s.id,
+                    label: s.name || s.id || 'Untitled',
+                  }));
+                })()}
+                showSearch
+                optionFilterProp="label"
+              />
+            </Modal>
             <Sider
               className="main-sider"
               collapsible

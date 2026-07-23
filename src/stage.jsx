@@ -23,14 +23,46 @@ let root = null;
 document.addEventListener('DOMContentLoaded', async () => {
   const load = ({ scene, stage, positions }) => {
     console.log("Scene ID:", scene, "Stage:", stage);
-    const merged = stage.positions.map((pos, i) => ({ position: pos, info: positions[i] }));
+    const stagePositions = stage.positions || [];
+    const scenePositions = positions || [];
+    const n = Math.max(stagePositions.length, scenePositions.length);
+    const blankInfo = () => ({
+      sex: { male: true, female: false, futa: false },
+      race: 'Human',
+      scale: 1.0,
+      submissive: false,
+      vampire: false,
+      dead: false,
+      add_cum: 0,
+    });
+    const blankPos = () => ({
+      event: [],
+      anim_obj: '',
+      offset: { x: 0, y: 0, z: 0, r: 0 },
+      strip_data: {
+        default: true,
+        everything: false,
+        nothing: false,
+        helmet: false,
+        gloves: false,
+        boots: false,
+      },
+      climax: false,
+      tags: [],
+      schlong: 0,
+      add_cum: 0,
+    });
+    const merged = Array.from({ length: n }, (_, i) => ({
+      position: stagePositions[i] || blankPos(),
+      info: scenePositions[i] || blankInfo(),
+    }));
     if (!root) root = ReactDOM.createRoot(document.getElementById("root"));
     root.render(
       <React.StrictMode>
         <Editor
           key={`Editor-${stage.id}`}
           _sceneId={scene}
-          _stage={stage}
+          _stage={{ ...stage, positions: merged.map((m) => m.position) }}
           _positions={merged}
         />
       </React.StrictMode>
@@ -122,7 +154,17 @@ function Editor({ _sceneId, _stage, _positions }) {
         });
         return;
       }
-      positionArg.push(stage_p);
+      const animRaw = Array.isArray(stage_p.anim_obj)
+        ? stage_p.anim_obj.filter(Boolean).join(' ')
+        : String(stage_p.anim_obj ?? '');
+      positionArg.push({
+        ...stage_p,
+        anim_obj: animRaw
+          .split(/[,\s]+/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .join(','),
+      });
       positionsInfo.push(scene_p);
     }
     const stage = {

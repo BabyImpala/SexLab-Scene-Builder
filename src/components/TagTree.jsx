@@ -1,107 +1,96 @@
-import React, { useState, useMemo } from "react";
-import { Input, Button, Tag, Space, Divider, TreeSelect } from 'antd';
+import React, { useMemo, useState } from "react";
+import { Select, Tag } from 'antd';
+import { loadUserTags, rememberUserTags } from '../common/userTags';
 
 function TagTree({
   tags,
   onChange,
   tagsSFW = [],
   tagsNSFW = [],
-  ...treeSelectProps
+  ...selectProps
 }) {
-  const [customTag, setCustomTag] = useState('');
-  const tagTree = useMemo(() => [
-    {
-      value: 'tagsSFW',
-      title: 'SFW',
-      selectable: false,
-      children: tagsSFW.map(tag => ({ value: tag, title: tag })),
-    },
-    {
-      value: 'tagsNSFW',
-      title: 'NSFW',
-      selectable: false,
-      children: tagsNSFW.map(tag => ({ value: tag, title: tag })),
-    },
-  ], [tagsSFW, tagsNSFW]);
+  const [userTags, setUserTags] = useState(() => loadUserTags());
+  const presets = useMemo(
+    () => [...tagsSFW, ...tagsNSFW],
+    [tagsSFW, tagsNSFW]
+  );
 
-  const addCustomTags = () => {
-    const add = customTag.split(',');
-    const newTags = [];
-    add.forEach(tag => {
-      tag = tag.trim();
-      const s = tag.toLowerCase().replace(/\s+/g, '');
-      if (!s || tags.find(t => t.toLowerCase().replace(/\s+/g, '') === s))
-        return;
-      newTags.push(tag);
-    });
-    if (newTags.length > 0) {
-      onChange([...tags, ...newTags]);
+  const options = useMemo(() => {
+    const groups = [
+      {
+        label: 'SFW',
+        options: tagsSFW.map((tag) => ({ value: tag, label: tag })),
+      },
+      {
+        label: 'NSFW',
+        options: tagsNSFW.map((tag) => ({ value: tag, label: tag })),
+      },
+    ];
+    if (userTags.length) {
+      groups.push({
+        label: 'Yours',
+        options: userTags.map((tag) => ({ value: tag, label: tag })),
+      });
     }
-    setCustomTag('');
-  }
+    return groups;
+  }, [tagsSFW, tagsNSFW, userTags]);
+
+  const handleChange = (next) => {
+    const cleaned = [];
+    const seen = new Set();
+    for (const tag of next || []) {
+      const trimmed = String(tag ?? '').trim();
+      if (!trimmed) continue;
+      const key = trimmed.toLowerCase().replace(/\s+/g, '');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      cleaned.push(trimmed);
+    }
+    setUserTags(rememberUserTags(cleaned, presets));
+    onChange(cleaned);
+  };
 
   return (
-    <TreeSelect
+    <Select
       className="tag-display-field"
       size="large"
-      multiple
-      placeholder="Please Select Tags"
+      mode="tags"
+      showSearch
       allowClear
+      placeholder="Search or create tags"
       value={tags}
-      onSelect={e => onChange([...tags, e])}
-      onClear={() => onChange([])}
-      dropdownRender={(menu) => (
-        <>
-          {menu}
-          <Divider style={{ margin: '8px 0' }} />
-          <Space.Compact style={{ width: '100%' }}>
-            <Input
-              value={customTag}
-              onChange={(e) => setCustomTag(e.target.value)}
-              placeholder="Custom Tag A, Custom Tag B"
-              onPressEnter={addCustomTags}
-            />
-            <Button type="primary" onClick={addCustomTags}>
-              Add
-            </Button>
-          </Space.Compact>
-        </>
-      )}
+      onChange={handleChange}
+      options={options}
+      optionFilterProp="label"
+      tokenSeparators={[',']}
       maxTagTextLength={20}
       tagRender={({ label, value, closable, onClose }) => {
-        const search = value.toLowerCase();
-        let color = tagsSFW.find((it) => it.toLowerCase() === search)
+        const search = String(value).toLowerCase();
+        const color = tagsSFW.find((it) => it.toLowerCase() === search)
           ? 'cyan'
           : tagsNSFW.find((it) => it.toLowerCase() === search)
             ? 'volcano'
-            : undefined;
+            : 'purple';
 
         const onPreventMouseDown = (evt) => {
           evt.preventDefault();
           evt.stopPropagation();
-        };
-        const onCloseEx = () => {
-          onChange(tags.filter(tag => tag !== value));
-          onClose();
         };
         return (
           <Tag
             color={color}
             onMouseDown={onPreventMouseDown}
             closable={closable}
-            onClose={onCloseEx}
+            onClose={onClose}
             style={{ margin: 2 }}
           >
             {label}
           </Tag>
         );
       }}
-      treeData={tagTree}
-      treeExpandAction={'click'}
-      {...treeSelectProps}
+      {...selectProps}
     />
   );
 }
 
 export default TagTree;
-
