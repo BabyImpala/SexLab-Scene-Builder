@@ -291,6 +291,14 @@ h3, h4, h5 { font-size: 1.2em; }
   padding: .5em;
 }
 
+.scene-positions-empty {
+  color: rgba(0, 0, 0, 0.45);
+}
+
+#root.dark-mode .scene-positions-empty {
+  color: rgba(255, 255, 255, 0.45);
+}
+
 .scene-position-card .ant-card-body {
   padding: 12px;
 }

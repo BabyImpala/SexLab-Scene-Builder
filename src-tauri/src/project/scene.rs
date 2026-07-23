@@ -1,6 +1,6 @@
 use log::warn;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, vec};
+use std::collections::HashMap;
 
 use super::{
     define::{FurnitureData, Node},
@@ -102,7 +102,7 @@ impl Default for Scene {
             furniture: Default::default(),
             private: Default::default(),
             tags: Default::default(),
-            positions: vec![PositionInfo::default(); 1], // Default to one position
+            positions: Default::default(),
             has_warnings: false,
         }
     }

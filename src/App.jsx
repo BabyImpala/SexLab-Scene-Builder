@@ -1478,7 +1478,7 @@ function App() {
                             span={24}
                             style={{ padding: 12, textAlign: 'center' }}
                           >
-                            <div style={{ color: 'rgba(0,0,0,0.45)' }}>
+                            <div className="scene-positions-empty">
                               No positions yet — use "Add Stage" or add a
                               position from the stage editor.
                             </div>
