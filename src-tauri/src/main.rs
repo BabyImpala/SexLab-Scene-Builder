@@ -6,6 +6,7 @@ mod cli;
 mod furniture;
 mod project;
 mod racekeys;
+mod window_geometry;
 
 use log::{error, info};
 use once_cell::sync::Lazy;
@@ -288,6 +289,11 @@ const THEME_SYSTEM: &str = "theme_system";
 const THEME_LIGHT: &str = "theme_light";
 const THEME_DARK: &str = "theme_dark";
 
+fn save_and_exit<R: Runtime>(app: &AppHandle<R>) {
+    window_geometry::save_all_window_geometry(app);
+    app.exit(0);
+}
+
 fn main() {
     setup_logger().expect("Unable to initialize logger");
     tauri::Builder::default()
@@ -336,6 +342,7 @@ fn main() {
             .inner_size(1280.0, 720.0)
             .build()
             .expect("Failed to create main window");
+            window_geometry::restore_window_geometry(&main_window);
             set_follow_os_theme(true);
             app.app_handle().set_theme(None);
             sync_theme_from_window(&main_window);
@@ -364,12 +371,20 @@ fn main() {
                             .kind(MessageDialogKind::Warning)
                             .show(move |should_close| {
                                 if should_close {
-                                    app.exit(0);
+                                    save_and_exit(&app);
                                 }
                             });
                     } else {
-                        app.exit(0);
+                        save_and_exit(&app);
                     }
+                }
+                tauri::WindowEvent::CloseRequested { .. }
+                    if window.label().starts_with("stage_editor_") =>
+                {
+                    window_geometry::save_window_geometry_by_label(
+                        window.app_handle(),
+                        window.label(),
+                    );
                 }
                 _ => {}
             }
@@ -790,6 +805,7 @@ fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: Editor
             return;
         }
     };
+    window_geometry::restore_window_geometry(&window);
     // once before sync: otherwise the webview can emit before the listener exists.
     let theme_window = window.clone();
     window.clone().once("on_request_data", move |_| {
