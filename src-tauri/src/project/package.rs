@@ -189,7 +189,8 @@ impl Package {
 
     pub fn write(&mut self, path: PathBuf) -> Result<(), String> {
         let file = fs::File::create(&path).map_err(|e| e.to_string())?;
-        serde_json::to_writer(file, self).map_err(|e| e.to_string())?;
+        serde_json::to_writer_pretty(BufWriter::new(file), self)
+            .map_err(|e| e.to_string())?;
         println!("Saved project {}", self.pack_name);
         Ok(())
     }
@@ -756,8 +757,9 @@ impl Package {
 }
 
 fn split_anim_objs(anim_obj: &str) -> Vec<String> {
+    // Accept comma-separated (SLSB JSON) and space-separated (FNIS / paste) forms.
     anim_obj
-        .split(',')
+        .split(|c: char| c == ',' || c.is_whitespace())
         .map(|x| x.trim().to_string())
         .filter(|x| !x.is_empty())
         .collect()
