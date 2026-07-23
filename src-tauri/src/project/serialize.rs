@@ -108,34 +108,19 @@ fn slsb_fnis_options(fixed_len: bool, has_anim_obj: bool) -> String {
     }
 }
 
-// Classic SexLab / SLAL: ' anim header + s/+ sequence, no pack hash
+// Classic SexLab / SLAL previously used `s`/`+` sequences. For P+ / Pandora we
+// emit singular `b` lines (md/o/a,Tn) so Behavior.hkx can be generated in-app.
+// Event names are un-hashed to match SLAL JSON stage ids. FootIK is out of v1.
 pub fn make_fnis_lines_slal_sequence(
     anim_id: &str,
     stages: &[(String, Vec<String>, bool)],
-    foot_ik_disable: bool,
 ) -> Vec<String> {
     let mut lines = vec![format!("' {}", anim_id)];
-    for (i, (event, anim_obj, fixed_len)) in stages.iter().enumerate() {
-        let prefix = if i == 0 { "s" } else { "+" };
-        let options = slal_fnis_options(i == 0 && foot_ik_disable, *fixed_len, !anim_obj.is_empty());
-        lines.push(make_fnis_line_slal(prefix, event, &options, anim_obj));
+    for (event, anim_obj, fixed_len) in stages {
+        let options = slsb_fnis_options(*fixed_len, !anim_obj.is_empty());
+        lines.push(make_fnis_line_slal("b", event, &options, anim_obj));
     }
     lines
-}
-
-fn slal_fnis_options(foot_ik_disable: bool, fixed_len: bool, has_anim_obj: bool) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    if has_anim_obj {
-        parts.push("o");
-    }
-    if foot_ik_disable {
-        parts.push("AVbHumanoidFootIKDisable");
-    }
-    if fixed_len {
-        parts.push("a");
-        parts.push("Tn");
-    }
-    parts.join(",")
 }
 
 fn make_fnis_line(
