@@ -114,7 +114,7 @@ function PositionField({ position, info, onChange }) {
                   'The sexes compatible with this position. Tick all that apply.'
                 }
               >
-                <Button type="link">Info</Button>
+                <Button type="text">Info</Button>
               </Tooltip>
             }
           >
@@ -149,7 +149,7 @@ function PositionField({ position, info, onChange }) {
                   'The behavior file (.hkx) describing the animation for this position. Without extension.'
                 }
               >
-                <Button type="link">Info</Button>
+                <Button type="text">Info</Button>
               </Tooltip>
             }
           >
@@ -195,7 +195,7 @@ function PositionField({ position, info, onChange }) {
                   'The anim object(s) associated with this position. Separate multiple with commas or spaces (FNIS-style).'
                 }
               >
-                <Button type="link">Info</Button>
+                <Button type="text">Info</Button>
               </Tooltip>
             }
           >
@@ -222,7 +222,7 @@ function PositionField({ position, info, onChange }) {
                   'Extra Data used to further specify the actor filling this position. Hover options for more info.'
                 }
               >
-                <Button type="link">Info</Button>
+                <Button type="text">Info</Button>
               </Tooltip>
             }
           >
@@ -291,7 +291,7 @@ function PositionField({ position, info, onChange }) {
               <Tooltip className="tool-tip"
                 title={'The position offset relative to animation center.'}
               >
-                <Button type="link">Info</Button>
+                <Button type="text">Info</Button>
               </Tooltip>
             }
           >
@@ -326,7 +326,7 @@ function PositionField({ position, info, onChange }) {
                   'The desired scale of this actor. Usually the same scale used in the creation of the behavior file.'
                 }
               >
-                <Button type="link">Info</Button>
+                <Button type="text">Info</Button>
               </Tooltip>
             }
           >
@@ -354,7 +354,7 @@ function PositionField({ position, info, onChange }) {
               <Tooltip className="tool-tip"
                 title={'The items this position should strip in this stage.'}
               >
-                <Button type="link">Info</Button>
+                <Button type="text">Info</Button>
               </Tooltip>
             }
           >

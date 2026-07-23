@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
 import { Graph, Shape } from '@antv/x6'
 import { History } from "@antv/x6-plugin-history";
-import { Menu, Layout, Card, Input, Space, Button, Empty, Modal, Tooltip, notification, Divider, Switch, Checkbox, Row, Col, InputNumber, Select, ConfigProvider, theme } from 'antd'
+import { Menu, Layout, Card, Input, Space, Button, Empty, Modal, Tooltip, notification, Divider, Switch, Checkbox, Row, Col, InputNumber, Select, ConfigProvider } from 'antd'
 import {
   ExperimentOutlined, FolderOutlined, PlusOutlined, ExclamationCircleOutlined, QuestionCircleOutlined, DiffOutlined, ZoomInOutlined, ZoomOutOutlined,
   DeleteOutlined, DoubleLeftOutlined, DoubleRightOutlined, PicCenterOutlined, CompressOutlined, PushpinOutlined, DragOutlined, WarningOutlined,
@@ -20,6 +20,8 @@ import "./scene/SceneNode"
 import "./App.css";
 // import "./Dark.css";
 import ScenePosition from "./scene/ScenePosition";
+import { getAppTheme } from "./common/theme";
+import { applyRootDarkClass, readOsDarkMode, writeStoredDarkMode } from "./common/darkMode";
 function makeMenuItem(label, key, icon, children, disabled, danger) {
   return { key, icon, children, label, disabled, danger };
 }
@@ -29,8 +31,22 @@ import { remove } from "@tauri-apps/plugin-fs";
 
 const ZOOM_OPTIONS = { minScale: 0.25, maxScale: 5 };
 
+function graphGridArgs(dark) {
+  return [
+    {
+      thickness: 1,
+      color: dark ? 'rgba(255,255,255,0.14)' : '#e8e8e8',
+    },
+    {
+      color: dark ? 'rgba(255,255,255,0.2)' : 'rgba(33, 35, 48, 0.1)',
+      thickness: 1,
+      factor: 8,
+    },
+  ];
+}
+
 function App() {
-  const [isDark, setIsDark] = useState(false);
+  const [isDark, setIsDark] = useState(readOsDarkMode);
   const [collapsed, setCollapsed] = useState(false);  // Sider collapsed?
   const [api, contextHolder] = notification.useNotification();
   const graphcontainer_ref = useRef(null);
@@ -65,16 +81,20 @@ function App() {
     return `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   }
 
-  // Dark Mode Toggle 
   useEffect(() => {
-    // Listen for the toggle_darkmode event from Tauri
     const unlisten = listen('toggle_darkmode', (event) => {
-      setIsDark(event.payload); // event.payload should be true or false
+      setIsDark(event.payload);
     });
+    invoke('get_in_darkmode').then(setIsDark).catch(() => {});
     return () => {
       unlisten.then(f => f());
     };
   }, []);
+
+  useEffect(() => {
+    writeStoredDarkMode(isDark);
+    applyRootDarkClass(isDark);
+  }, [isDark]);
 
   // Graph
   useEffect(() => {
@@ -82,19 +102,9 @@ function App() {
       container: graphcontainer_ref.current,
       grid: {
         visible: true,
-        size: 10,
+        size: 20,
         type: 'doubleMesh',
-        args: [
-          {
-            thickness: 1,
-            color: isDark ? '#444' : '#eee'
-          },
-          {
-            color: 'rgba(33, 35, 48, 0.1)',
-            thickness: 3,
-            factor: 5
-          }
-        ]
+        args: graphGridArgs(isDark),
       },
       panning: true,
       autoResize: true,
@@ -213,6 +223,14 @@ function App() {
       }
     }
   }, []);
+
+  useEffect(() => {
+    if (!graph) return;
+    graph.drawGrid({
+      type: 'doubleMesh',
+      args: graphGridArgs(isDark),
+    });
+  }, [graph, isDark]);
 
   useEffect(() => {
     if (!graph) return;
@@ -882,19 +900,7 @@ function App() {
   };
 
   return (
-    <ConfigProvider
-      theme={{
-        algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
-        token: isDark
-          ? {
-              //Dark Mode Color Overrides
-              colorBgBase: '#001529',
-            }
-          : {
-              // Light Mode Color Overrides
-            },
-      }}
-    >
+    <ConfigProvider theme={getAppTheme(isDark)}>
       <Layout hasSider style={{ height: '100vh' }}>
         <PanelGroup direction="horizontal" style={{ height: '100%' }}>
           {/* Left Panel */}
@@ -962,7 +968,7 @@ function App() {
                 />
                 <Divider id="sidebar-divider" />
                 <Menu
-                  theme={'dark'}
+                  theme={isDark ? 'dark' : 'light'}
                   mode="inline"
                   selectable={false}
                   items={sideBarMenu}
@@ -1210,7 +1216,7 @@ function App() {
                               'Tags which are shared between all stages in the scene.'
                             }
                           >
-                            <Button type="link">Info</Button>
+                            <Button type="text">Info</Button>
                           </Tooltip>
                         }
                       >
@@ -1235,7 +1241,7 @@ function App() {
                             className="tool-tip"
                             title={'Furniture settings for the scene.'}
                           >
-                            <Button type="link">Info</Button>
+                            <Button type="text">Info</Button>
                           </Tooltip>
                         }
                       >
@@ -1436,7 +1442,7 @@ function App() {
                           'Position Date shared between all stages in the scene.'
                         }
                       >
-                        <Button type="link">Info</Button>
+                        <Button type="text">Info</Button>
                       </Tooltip>
                     }
                   >

@@ -1,6 +1,6 @@
 .resize-handle {
     width: 4px;
-    background-color: #f0f0f0;
+    background-color: var(--resize-handle-bg);
     transition: background-color 0.2s;
     position: relative;
     cursor: col-resize;
@@ -8,7 +8,7 @@
   .resize-handle-horizontal {
     width: 100%;
     height: 4px;
-    background-color: #f0f0f0;
+    background-color: var(--resize-handle-bg);
     transition: background-color 0.2s;
     position: relative;
     cursor: row-resize;
@@ -47,7 +47,7 @@
   .resize-handle:active,
   .resize-handle-horizontal:hover,
   .resize-handle-horizontal:active {
-    background-color: #1677ff;
+    background-color: var(--app-accent, var(--bright-blue));
   }
   
   .main-sider {
@@ -72,12 +72,20 @@
     font-size: 18px;
     cursor: pointer;
     transition: color 0.3s;
-    color: rgba(255, 255, 255, 0.65);
+    color: rgba(0, 0, 0, 0.65);
     text-align: center;
     line-height: 48px;
   }
   
   .custom-trigger:hover {
+    color: rgba(0, 0, 0, 0.88);
+  }
+
+  #root.dark-mode .custom-trigger {
+    color: rgba(255, 255, 255, 0.65);
+  }
+
+  #root.dark-mode .custom-trigger:hover {
     color: rgb(255, 255, 255);
   }
   
@@ -86,6 +94,6 @@
   }
 
   .custom-trigger:active {
-    background-color: #1677ff;
-    border-radius: 10px;
+    background-color: var(--app-accent, var(--bright-blue));
+    border-radius: var(--app-radius);
   }

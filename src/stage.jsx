@@ -3,8 +3,8 @@ import { emit, once, listen } from '@tauri-apps/api/event'
 import { invoke } from "@tauri-apps/api/core"
 import ReactDOM from "react-dom/client";
 import { useImmer } from "use-immer";
-import { AlipaySquareFilled, FileDoneOutlined, TagsOutlined, SaveOutlined, TeamOutlined } from '@ant-design/icons';
-import { Input, Button, Tag, Space, Tooltip, InputNumber, Card, Layout, Divider, Menu, Row, Col, Tabs, TreeSelect, notification, Collapse, ConfigProvider, theme } from 'antd';
+import { FileDoneOutlined, TagsOutlined, SaveOutlined, TeamOutlined } from '@ant-design/icons';
+import { Input, Button, Tooltip, InputNumber, Card, Layout, Row, Col, Tabs, notification, Collapse, ConfigProvider } from 'antd';
 
 import { tagsSFW, tagsNSFW } from "./common/Tags"
 import PositionField from "./stage/PositionField";
@@ -12,16 +12,15 @@ import TagTree from "./components/TagTree";
 import "./stage.css";
 import "./App.css";
 // import "./Dark.css";
+import { getAppTheme } from "./common/theme";
+import { applyRootDarkClass, readOsDarkMode, writeStoredDarkMode } from "./common/darkMode";
 
-const { Header } = Layout;
+const { Header, Content } = Layout;
 const { TextArea } = Input;
-
-// New Dark Mode State
-
 
 let root = null;
 document.addEventListener('DOMContentLoaded', async () => {
-  const load = ({ scene, stage, positions }) => {
+  const load = ({ scene, stage, positions, dark }) => {
     console.log("Scene ID:", scene, "Stage:", stage);
     const stagePositions = stage.positions || [];
     const scenePositions = positions || [];
@@ -56,6 +55,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       position: stagePositions[i] || blankPos(),
       info: scenePositions[i] || blankInfo(),
     }));
+    const initialDark = typeof dark === 'boolean' ? dark : readOsDarkMode();
+    writeStoredDarkMode(initialDark);
+    applyRootDarkClass(initialDark);
     if (!root) root = ReactDOM.createRoot(document.getElementById("root"));
     root.render(
       <React.StrictMode>
@@ -64,6 +66,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           _sceneId={scene}
           _stage={{ ...stage, positions: merged.map((m) => m.position) }}
           _positions={merged}
+          _initialDark={initialDark}
         />
       </React.StrictMode>
     );
@@ -74,7 +77,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     load(payload);
     return;
   }
-  // Send Event to backend that the dom is loaded and wait for it to send the window data
   once('on_data_received', ({ payload }) => {
     window.sessionStorage.setItem('origin_data', JSON.stringify(payload));
     load(payload);
@@ -86,27 +88,34 @@ function makePositionTab(p, i) {
   return { key: `PTab${i}`, position: p.position, info: p.info }
 }
 
-function Editor({ _sceneId, _stage, _positions }) {
-  const [isDark, setIsDark] = useState(false);
+function Editor({ _sceneId, _stage, _positions, _initialDark }) {
+  const [isDark, setIsDark] = useState(() =>
+    typeof _initialDark === 'boolean' ? _initialDark : readOsDarkMode()
+  );
   const [api, contextHolder] = notification.useNotification();
 
   const [name, setName] = useState(_stage.name);
   const [positions, updatePositions] = useImmer(_positions.map((p, i) => { return makePositionTab(p, i) }));
   const [activePosition, setActivePosition] = useState(positions[0].key);
   const positionIdx = useRef(_positions.length);
-  const [tags, setTags] = useState(_stage.tags);
-  const [fixedLen, setFixedLen] = useState(_stage.extra.fixed_len);
-  const [navText, setNavText] = useState(_stage.extra.nav_text);
+  const [tags, setTags] = useState(_stage.tags || []);
+  const [fixedLen, setFixedLen] = useState(_stage.extra?.fixed_len);
+  const [navText, setNavText] = useState(_stage.extra?.nav_text || '');
 
   useEffect(() => {
-    // Listen for the toggle_darkmode event from Tauri
     const unlisten = listen('toggle_darkmode', (event) => {
-      setIsDark(event.payload); // event.payload should be true or false
+      setIsDark(event.payload);
     });
-    // Optionally, get initial dark mode state from backend
     invoke('get_in_darkmode').then(setIsDark);
-    return () => { unlisten.then(f => f()); };
+    return () => {
+      unlisten.then(f => f());
+    };
   }, []);
+
+  useEffect(() => {
+    writeStoredDarkMode(isDark);
+    applyRootDarkClass(isDark);
+  }, [isDark]);
 
 
   useEffect(() => {
@@ -273,7 +282,7 @@ function Editor({ _sceneId, _stage, _positions }) {
                       'A short text for the player to read when given the option to branch into this stage.'
                     }
                   >
-                    <Button type="link">Info</Button>
+                    <Button type="text">Info</Button>
                   </Tooltip>
                 }
               >
@@ -299,7 +308,7 @@ function Editor({ _sceneId, _stage, _positions }) {
                       'Duration of an animation that should only play once (does not loop).'
                     }
                   >
-                    <Button type="link">Info</Button>
+                    <Button type="text">Info</Button>
                   </Tooltip>
                 }
               >
@@ -324,25 +333,12 @@ function Editor({ _sceneId, _stage, _positions }) {
   ]
 
   return (
-    <ConfigProvider
-      theme={{
-      algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
-      token: isDark
-        ? {
-          //Dark Mode Color Overrides
-          colorBgBase: '#001529',
-        }
-      : {
-        // Light Mode Color Overrides
-      }
-
-    }}
-    >
-      <Layout>
+    <ConfigProvider theme={getAppTheme(isDark)}>
+      <Layout style={{ minHeight: '100vh' }}>
         {contextHolder}
         <Header className="stage-header">
-          <Row>
-            <Col>
+          <Row align="middle" justify="space-between" wrap={false} style={{ width: '100%' }}>
+            <Col flex="none">
               <Input
                 id="stage-namefield-input"
                 className="stage-namefield"
@@ -356,34 +352,16 @@ function Editor({ _sceneId, _stage, _positions }) {
                 onFocus={(e) => e.target.select()}
               />
             </Col>
-            <Col flex={'auto'}>
-              <Menu
-                className="stage-header-menu"
-                theme={isDark ? "dark" : "light"}
-                mode="horizontal"
-                selectable={false}
-                defaultSelectedKeys={['save']}
-                onClick={({ key }) => {
-                  switch (key) {
-                    case 'save':
-                      saveAndReturn();
-                      break;
-                  }
-                }}
-                items={[
-                  { type: 'divider' },
-                  {
-                    label: 'Save',
-                    key: 'save',
-                    icon: <SaveOutlined />,
-                    className: 'stage-header-menu-entry',
-                  },
-                ]}
-              />
+            <Col flex="none">
+              <Button type="text" icon={<SaveOutlined />} onClick={saveAndReturn}>
+                Save
+              </Button>
             </Col>
           </Row>
         </Header>
-        <Collapse items={positionsCollapsed} defaultActiveKey={['1', '2', '3']} />
+        <Content className="stage-body">
+          <Collapse items={positionsCollapsed} defaultActiveKey={['1', '2', '3']} />
+        </Content>
       </Layout>
     </ConfigProvider>
   )
