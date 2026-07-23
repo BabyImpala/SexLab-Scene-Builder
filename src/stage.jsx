@@ -154,7 +154,17 @@ function Editor({ _sceneId, _stage, _positions }) {
         });
         return;
       }
-      positionArg.push(stage_p);
+      const animRaw = Array.isArray(stage_p.anim_obj)
+        ? stage_p.anim_obj.filter(Boolean).join(' ')
+        : String(stage_p.anim_obj ?? '');
+      positionArg.push({
+        ...stage_p,
+        anim_obj: animRaw
+          .split(/[,\s]+/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .join(','),
+      });
       positionsInfo.push(scene_p);
     }
     const stage = {
