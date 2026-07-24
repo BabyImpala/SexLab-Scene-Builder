@@ -47,12 +47,89 @@ fn emit_project_update<R: Runtime>(emitter: &impl Emitter<R>, prjct: &Package) {
     }
 }
 
-#[derive(Debug, Serialize, Clone)]
-struct ExportRequestPayload {
-    /// `"slsb"`, `"slal"`, or `"both"`.
-    kind: String,
-    /// Animation folder name under `meshes/actors/<race>/animations/`.
-    fnis_mod: String,
+fn export_tip_pref_path() -> Option<std::path::PathBuf> {
+    dirs::data_local_dir().map(|d| d.join("SexLabSceneBuilder").join("hide_export_clip_tip"))
+}
+
+fn is_export_clip_tip_hidden() -> bool {
+    export_tip_pref_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
+fn set_export_clip_tip_hidden(hidden: bool) {
+    let Some(path) = export_tip_pref_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, if hidden { "1" } else { "0" });
+}
+
+fn run_export(app: AppHandle, kind: ExportKind) {
+    tauri::async_runtime::spawn(async move {
+        let prjct = PROJECT.lock().unwrap();
+        if let Err(err) = prjct.export_as(&app, kind) {
+            if err == "Export cancelled" {
+                return;
+            }
+            error!("Failed to export project: {}", err);
+            app.dialog()
+                .message(&err)
+                .title("Export failed")
+                .kind(MessageDialogKind::Error)
+                .buttons(MessageDialogButtons::Ok)
+                .show(|_| {});
+        }
+    });
+}
+
+/// Show the Pandora clip-folder tip (unless dismissed), then open the export picker.
+fn start_export_with_tip(app: &AppHandle, kind: ExportKind) {
+    if is_export_clip_tip_hidden() {
+        run_export(app.clone(), kind);
+        return;
+    }
+
+    let fnis_mod = PROJECT.lock().unwrap().fnis_mod_name();
+    let message = format!(
+        "Export writes AnimLists, Behavior files, and registry data — not your .hkx animation clips.\n\n\
+         Copy your animation HKX files into:\n\
+         meshes/actors/<race>/animations/{fnis_mod}/\n\n\
+         For humans that is usually:\n\
+         meshes/actors/character/animations/{fnis_mod}/\n\n\
+         Pandora only plays clips that live in the folder the Behavior references."
+    );
+
+    let app_continue = app.clone();
+    app.dialog()
+        .message(message)
+        .title("Animation clips for Pandora")
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Continue".into(),
+            "Cancel".into(),
+        ))
+        .show(move |proceed| {
+            if !proceed {
+                return;
+            }
+            let app_hide = app_continue.clone();
+            app_continue
+                .dialog()
+                .message("Don't show this tip again on export?")
+                .title("Export tip")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::YesNo)
+                .show(move |hide| {
+                    if hide {
+                        set_export_clip_tip_hidden(true);
+                    }
+                    run_export(app_hide, kind);
+                });
+        });
 }
 
 pub static PROJECT: Lazy<Mutex<Package>> = Lazy::new(|| {
@@ -342,8 +419,7 @@ fn main() {
             stage_save_and_close,
             make_position,
             mark_as_edited,
-            get_in_darkmode,
-            export_project
+            get_in_darkmode
         ])
         .setup(|app| {
             let matches = app.cli().matches()?;
@@ -650,22 +726,11 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         }
         "export_both" | "export_slsb" | "export_slal" => {
             let kind = match event.id().0.as_str() {
-                "export_slsb" => "slsb",
-                "export_slal" => "slal",
-                _ => "both",
+                "export_slsb" => ExportKind::Slsb,
+                "export_slal" => ExportKind::Slal,
+                _ => ExportKind::Both,
             };
-            let prjct = PROJECT.lock().unwrap();
-            let payload = ExportRequestPayload {
-                kind: kind.to_string(),
-                fnis_mod: prjct.fnis_mod_name(),
-            };
-            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-                if let Err(e) = window.emit("on_export_request", &payload) {
-                    error!("Failed to emit on_export_request: {}", e);
-                }
-            } else {
-                error!("Main window missing; cannot start export tip");
-            }
+            start_export_with_tip(app, kind);
         }
         THEME_SYSTEM => {
             apply_system_theme(app);
@@ -833,35 +898,6 @@ async fn mark_as_edited<R: Runtime>(window: tauri::Window<R>) -> () {
 #[tauri::command]
 fn get_in_darkmode() -> bool {
     get_darkmode()
-}
-
-#[tauri::command]
-fn export_project(app: AppHandle, kind: String) {
-    let export_kind = match kind.as_str() {
-        "slsb" => ExportKind::Slsb,
-        "slal" => ExportKind::Slal,
-        "both" => ExportKind::Both,
-        other => {
-            error!("Unknown export kind: {}", other);
-            return;
-        }
-    };
-    tauri::async_runtime::spawn(async move {
-        let prjct = PROJECT.lock().unwrap();
-        if let Err(err) = prjct.export_as(&app, export_kind) {
-            // Folder picker cancel is not a real failure — skip the error dialog.
-            if err == "Export cancelled" {
-                return;
-            }
-            error!("Failed to export project: {}", err);
-            app.dialog()
-                .message(&err)
-                .title("Export failed")
-                .kind(MessageDialogKind::Error)
-                .buttons(MessageDialogButtons::Ok)
-                .show(|_| {});
-        }
-    });
 }
 
 /* Scene */

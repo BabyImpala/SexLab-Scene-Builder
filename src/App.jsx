@@ -31,23 +31,6 @@ import TagTree from "./components/TagTree";
 import { remove } from "@tauri-apps/plugin-fs";
 
 const ZOOM_OPTIONS = { minScale: 0.25, maxScale: 5 };
-const EXPORT_CLIP_TIP_KEY = 'slsb.hideExportClipTip';
-
-function isExportClipTipHidden() {
-  try {
-    return localStorage.getItem(EXPORT_CLIP_TIP_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
-
-function hideExportClipTip() {
-  try {
-    localStorage.setItem(EXPORT_CLIP_TIP_KEY, '1');
-  } catch {
-    /* ignore quota / private mode */
-  }
-}
 
 function buildStageEdgeConfig(sourceNode, targetNode) {
   const sp = sourceNode.getPosition();
@@ -105,10 +88,6 @@ function App() {
   const [cloneToStage, setCloneToStage] = useState(null);
   const [cloneToSourceScene, setCloneToSourceScene] = useState(null);
   const [cloneToTargetId, setCloneToTargetId] = useState(null);
-  const [exportTipOpen, setExportTipOpen] = useState(false);
-  const [exportTipKind, setExportTipKind] = useState('both');
-  const [exportTipFnisMod, setExportTipFnisMod] = useState('');
-  const [exportTipDontShow, setExportTipDontShow] = useState(false);
   const inEdit = useRef(false);
   const [showAreas, setShowAreas] = useState(false);
   const activeSceneRef = useRef(null);
@@ -505,33 +484,6 @@ function App() {
       unlisten.then(res => { res() });
     }
   }, [graph])
-
-  useEffect(() => {
-    const unlisten = listen('on_export_request', (event) => {
-      const payload = event.payload || {};
-      const kind = payload.kind || 'both';
-      const fnisMod = payload.fnis_mod || '';
-      if (isExportClipTipHidden()) {
-        invoke('export_project', { kind });
-        return;
-      }
-      setExportTipKind(kind);
-      setExportTipFnisMod(fnisMod);
-      setExportTipDontShow(false);
-      setExportTipOpen(true);
-    });
-    return () => {
-      unlisten.then((res) => { res(); });
-    };
-  }, []);
-
-  const confirmExportTip = () => {
-    if (exportTipDontShow) {
-      hideExportClipTip();
-    }
-    setExportTipOpen(false);
-    invoke('export_project', { kind: exportTipKind });
-  };
 
   const clearGraph = () => {
     if (graph.getCellCount() == 0)
@@ -1063,51 +1015,6 @@ function App() {
           {/* Left Panel */}
           <Panel minSize={10} defaultSize={15} maxSize={50} id="left-panel">
             {contextHolder}
-            <Modal
-              title="Animation clips for Pandora"
-              open={exportTipOpen}
-              onOk={confirmExportTip}
-              onCancel={() => setExportTipOpen(false)}
-              okText="Continue to export"
-              cancelText="Cancel"
-              destroyOnClose
-            >
-              <p style={{ marginBottom: 12 }}>
-                Export writes AnimLists, Behavior files, and registry data — not
-                your <code>.hkx</code> animation clips. Pandora only plays clips
-                that live in the folder the Behavior references.
-              </p>
-              <p style={{ marginBottom: 8 }}>
-                Copy your animation HKX files into:
-              </p>
-              <pre
-                style={{
-                  margin: '0 0 12px',
-                  padding: '8px 10px',
-                  fontSize: 12,
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-all',
-                  background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
-                  borderRadius: 4,
-                }}
-              >
-{`meshes/actors/<race>/animations/${exportTipFnisMod || '<ModName>'}/`}
-              </pre>
-              <p style={{ marginBottom: 12 }}>
-                For humans that is usually{' '}
-                <code>
-                  meshes/actors/character/animations/{exportTipFnisMod || '<ModName>'}/
-                </code>
-                . The folder name must match the AnimList / Behavior export
-                (shown above).
-              </p>
-              <Checkbox
-                checked={exportTipDontShow}
-                onChange={(e) => setExportTipDontShow(e.target.checked)}
-              >
-                Don&apos;t show this again
-              </Checkbox>
-            </Modal>
             <Modal
               title="Clone stage to animation"
               open={cloneToOpen}
