@@ -617,8 +617,13 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                 }
                 set_edited(false);
                 let window = app.get_webview_window(MAIN_WINDOW).unwrap();
-                let _ = window
-                    .set_title(format!("{} - {}", DEFAULT_MAINWINDOW_TITLE, prjct.pack_name).as_str());
+                if prjct.pack_name.is_empty() {
+                    let _ = window.set_title(DEFAULT_MAINWINDOW_TITLE);
+                } else {
+                    let _ = window.set_title(
+                        format!("{} - {}", DEFAULT_MAINWINDOW_TITLE, prjct.pack_name).as_str(),
+                    );
+                }
             });
         }
         "export_both" | "export_slsb" | "export_slal" => {

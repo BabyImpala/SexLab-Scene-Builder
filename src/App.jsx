@@ -478,14 +478,7 @@ function App() {
       console.log("Opening new Project with Scenes: ", scns);
       updateScenes(scns);
       setPackName(payload.pack_name ?? '');
-      const author =
-        !payload.pack_author || payload.pack_author === 'Unknown'
-          ? ''
-          : payload.pack_author;
-      setPackAuthor(author);
-      if (payload.pack_author === 'Unknown') {
-        invoke('set_pack_author', { author: '' });
-      }
+      setPackAuthor(payload.pack_author ?? '');
       setEdited(false);
       if (scns.length) {
         setActiveScene(scns[0]);

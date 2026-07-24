@@ -164,7 +164,6 @@ impl Package {
             .into_path()
             .map_err(|e| e.to_string())?;
         *self = Package::from_file(fs::File::open(&path).map_err(|e| e.to_string())?)?;
-        self.set_project_name_from_path(&path);
         self.pack_path = path.into();
         Ok(())
     }
@@ -184,7 +183,6 @@ impl Package {
             self.pack_path.clone()
         };
 
-        self.set_project_name_from_path(&path);
         self.write(path)
     }
 
@@ -273,10 +271,7 @@ impl Package {
 
         let mut prjct = Package::new();
         prjct.version = 0; // SLAL files are always version 0
-        prjct.pack_name = slal["name"]
-            .as_str()
-            .ok_or("Missing name attribute")?
-            .into();
+        // pack_name / pack_author stay empty for the user to fill in.
 
         let anims = slal["animations"]
             .as_array()
@@ -673,21 +668,6 @@ impl Package {
         }
 
         Ok(())
-    }
-
-    fn set_project_name_from_path(&mut self, path: &PathBuf) -> () {
-        if !self.pack_name.is_empty() {
-            return;
-        }
-        self.pack_name = String::from(
-            path.file_name() // ...\\{project.slsb.json}
-                .and_then(|name| name.to_str())
-                .and_then(|str| {
-                    let ret = &str[0..str.find(".slsb.json").unwrap_or(str.len())];
-                    Some(ret)
-                })
-                .unwrap_or_default(),
-        );
     }
 
     fn write_binary_file(&self, root_dir: &PathBuf) -> Result<(), std::io::Error> {
