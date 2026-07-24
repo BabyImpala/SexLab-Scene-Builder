@@ -1,12 +1,15 @@
 import { theme } from 'antd';
 
+const CHARCOAL = '#141414';
+const CHARCOAL_ALT = '#1f1f1f';
+
 export function getAppTheme(isDark) {
   return {
     algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
     token: isDark
       ? {
-          colorBgBase: '#141414',
-          colorBgLayout: '#141414',
+          colorBgBase: CHARCOAL,
+          colorBgLayout: CHARCOAL,
           colorBorder: 'rgba(255, 255, 255, 0.18)',
           colorBorderSecondary: 'rgba(255, 255, 255, 0.12)',
           borderRadius: 6,
@@ -30,21 +33,29 @@ export function getAppTheme(isDark) {
     components: {
       Layout: isDark
         ? {
-            colorBgHeader: '#141414',
-            colorBgBody: '#141414',
-            colorBgSider: '#141414',
-            colorBgTrigger: '#1f1f1f',
+            // colorBg* aliases are deprecated; colorBgSider was never mapped
+            headerBg: CHARCOAL,
+            bodyBg: CHARCOAL,
+            siderBg: CHARCOAL,
+            triggerBg: CHARCOAL_ALT,
           }
         : {
-            colorBgHeader: '#ffffff',
-            colorBgSider: '#ffffff',
-            colorBgTrigger: '#f5f5f5',
+            headerBg: '#ffffff',
+            siderBg: '#ffffff',
+            triggerBg: '#f5f5f5',
           },
       Menu: isDark
         ? {
-            itemBg: '#141414',
-            subMenuItemBg: '#1f1f1f',
-            menuSubMenuBg: '#141414',
+            // Menu theme="dark" reads dark* tokens, not itemBg
+            darkItemBg: CHARCOAL,
+            darkSubMenuItemBg: CHARCOAL_ALT,
+            darkPopupBg: CHARCOAL,
+            darkItemSelectedColor: 'rgba(255, 255, 255, 0.85)',
+            darkItemSelectedBg: 'rgba(255, 255, 255, 0.08)',
+            darkItemHoverBg: 'rgba(255, 255, 255, 0.08)',
+            itemBg: CHARCOAL,
+            subMenuItemBg: CHARCOAL_ALT,
+            menuSubMenuBg: CHARCOAL,
             horizontalItemSelectedColor: 'rgba(255, 255, 255, 0.85)',
             horizontalItemSelectedBg: 'transparent',
             itemSelectedColor: 'rgba(255, 255, 255, 0.85)',
