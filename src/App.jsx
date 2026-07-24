@@ -1329,14 +1329,40 @@ function App() {
                         bordered={false}
                         title={'Scene Tags'}
                         extra={
-                          <Tooltip
-                            className="tool-tip"
-                            title={
-                              'Tags which are shared between all stages in the scene.'
-                            }
-                          >
-                            <Button type="text">Info</Button>
-                          </Tooltip>
+                          <Space size={0}>
+                            <Tooltip
+                              title="Copy scene tags onto every stage (replaces each stage's tags)."
+                            >
+                              <Button
+                                type="text"
+                                disabled={
+                                  !activeScene ||
+                                  !activeScene.stages ||
+                                  activeScene.stages.length === 0
+                                }
+                                onClick={() => {
+                                  if (!activeScene?.stages?.length) return;
+                                  const copied = [...(activeScene.tags || [])];
+                                  updateActiveScene((prev) => {
+                                    for (const stage of prev.stages) {
+                                      stage.tags = [...copied];
+                                    }
+                                  });
+                                  setEdited(true);
+                                }}
+                              >
+                                Copy to stages
+                              </Button>
+                            </Tooltip>
+                            <Tooltip
+                              className="tool-tip"
+                              title={
+                                'Tags which are shared between all stages in the scene.'
+                              }
+                            >
+                              <Button type="text">Info</Button>
+                            </Tooltip>
+                          </Space>
                         }
                       >
                         <TagTree
