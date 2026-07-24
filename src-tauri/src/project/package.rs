@@ -862,7 +862,7 @@ impl Package {
 
     /// Folder + `FNIS_<id>_*` stem under `animations/` / `behaviors/`.
     /// Prefers `Author_PackName` so two authors shipping the same pack name do not collide.
-    fn fnis_mod_name(&self) -> String {
+    pub fn fnis_mod_name(&self) -> String {
         build_fnis_mod_name(&self.pack_name, &self.pack_author, &self.prefix_hash.0)
     }
 }
