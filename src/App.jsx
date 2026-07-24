@@ -584,6 +584,7 @@ function App() {
   const gridSize = 260;
   const LAYOUT_H_GAP = 280;
   const LAYOUT_V_GAP = 150;
+  const MAX_STAGES_PER_ROW = 5;
 
   const graphCoordsStacked = (sceneGraph) => {
     const positions = Object.values(sceneGraph || {}).map(({ x, y }) => ({ x, y }));
@@ -629,12 +630,11 @@ function App() {
       [...byLevel.values()].every((ids) => ids.length <= 1);
 
     const positions = new Map();
-    if (linear && ordered.length > 5) {
-      const rows = ordered.length > 14 ? Math.ceil(ordered.length / 5) : 2;
-      const cols = Math.ceil(ordered.length / rows);
+    if (linear && ordered.length > MAX_STAGES_PER_ROW) {
+      // Cap row width so zoomToFit does not shrink node text too far.
       ordered.forEach((id, i) => {
-        const row = Math.floor(i / cols);
-        const col = i % cols;
+        const row = Math.floor(i / MAX_STAGES_PER_ROW);
+        const col = i % MAX_STAGES_PER_ROW;
         positions.set(id, {
           x: 40 + col * LAYOUT_H_GAP,
           y: 40 + row * LAYOUT_V_GAP,
@@ -657,7 +657,12 @@ function App() {
         );
         const orphanY = 40 + maxRows * LAYOUT_V_GAP;
         orphans.forEach((id, i) => {
-          positions.set(id, { x: 40 + i * LAYOUT_H_GAP, y: orphanY });
+          const row = Math.floor(i / MAX_STAGES_PER_ROW);
+          const col = i % MAX_STAGES_PER_ROW;
+          positions.set(id, {
+            x: 40 + col * LAYOUT_H_GAP,
+            y: orphanY + row * LAYOUT_V_GAP,
+          });
         });
       }
     }
