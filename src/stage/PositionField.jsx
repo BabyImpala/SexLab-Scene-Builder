@@ -104,7 +104,7 @@ function PositionField({ position, info, onChange }) {
             />
           </Card>
         </Col>
-        <Col span={9}> {/* Sex */}
+        <Col span={8}> {/* Sex */}
           <Card
             className="position-attribute-card"
             title={'Sex'}
@@ -129,6 +129,53 @@ function PositionField({ position, info, onChange }) {
                   {attr.charAt(0).toUpperCase() + attr.slice(1)}
                 </Checkbox>
               ))}
+            </Space>
+          </Card>
+        </Col>
+        <Col span={8}> {/* SLAL flags */}
+          <Card
+            className="position-attribute-card"
+            title={'SLAL'}
+            extra={
+              <Tooltip className="tool-tip"
+                title={
+                  'Per-stage flags written to classic SLAL JSON on export. SOS is Schlongs of Skyrim bend (−9…9).'
+                }
+              >
+                <Button type="text">Info</Button>
+              </Tooltip>
+            }
+          >
+            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              <Space wrap>
+                {[
+                  { attr: 'open_mouth', label: 'Open Mouth' },
+                  { attr: 'silent', label: 'Silent' },
+                  { attr: 'strap_on', label: 'Strap-on' },
+                ].map(({ attr, label }) => (
+                  <Checkbox
+                    key={attr}
+                    checked={!!position[attr]}
+                    onChange={(e) => onChange({ ...position, [attr]: e.target.checked }, info)}
+                  >
+                    {label}
+                  </Checkbox>
+                ))}
+              </Space>
+              <InputNumber
+                className="position-schlong-input"
+                addonBefore="SOS"
+                controls
+                precision={0}
+                step={1}
+                min={-9}
+                max={9}
+                value={position.schlong ?? 0}
+                onChange={(e) => {
+                  const v = typeof e === 'number' ? Math.max(-9, Math.min(9, e)) : 0;
+                  onChange({ ...position, schlong: v }, info);
+                }}
+              />
             </Space>
           </Card>
         </Col>
