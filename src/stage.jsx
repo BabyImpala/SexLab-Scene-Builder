@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { emit, once, listen } from '@tauri-apps/api/event'
+import { emit, listen } from '@tauri-apps/api/event'
 import { invoke } from "@tauri-apps/api/core"
 import ReactDOM from "react-dom/client";
 import { useImmer } from "use-immer";
@@ -71,16 +71,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       </React.StrictMode>
     );
   }
-  const stagestr = window.sessionStorage.getItem('origin_data');
-  if (stagestr) {
-    const payload = await JSON.parse(stagestr);
-    load(payload);
-    return;
-  }
-  once('on_data_received', ({ payload }) => {
+  // Keep listening so a re-focused existing editor can receive a fresh payload.
+  await listen('on_data_received', ({ payload }) => {
     window.sessionStorage.setItem('origin_data', JSON.stringify(payload));
     load(payload);
-  }).then(f => f());
+  });
   await emit('on_request_data');
 });
 

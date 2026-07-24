@@ -796,9 +796,12 @@ fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: Editor
         "Opening Stage {} from Scene {}",
         stage.id.0, payload.scene.0
     );
-    // Reopening the same stage must focus the existing window (labels are unique)
+    // Reopening the same stage: focus and re-send payload (recovers empty first open).
     if let Some(existing) = app.get_webview_window(&label) {
         let _ = existing.set_focus();
+        if let Err(e) = existing.emit("on_data_received", payload.clone()) {
+            error!("Failed to re-send stage editor payload: {}", e);
+        }
         return;
     }
     let window = match WebviewWindowBuilder::new(
@@ -828,14 +831,14 @@ fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: Editor
             return;
         }
     };
-    window_geometry::restore_window_geometry(&window);
-    // once before sync: otherwise the webview can emit before the listener exists.
+    // Register before geometry restore: webview can emit before restore finishes.
     let theme_window = window.clone();
     window.clone().once("on_request_data", move |_| {
         if let Err(e) = window.emit("on_data_received", payload.clone()) {
             error!("Failed to send stage editor payload: {}", e);
         }
     });
+    window_geometry::restore_window_geometry(&theme_window);
     sync_theme_from_window(&theme_window);
 }
 
