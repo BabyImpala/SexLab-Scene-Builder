@@ -29,6 +29,24 @@ use crate::project::position_info::PositionInfo;
 
 const DEFAULT_MAINWINDOW_TITLE: &str = "SexLab Scene Builder";
 
+#[derive(Debug, Serialize, Clone)]
+struct ProjectUpdatePayload<'a> {
+    scenes: &'a std::collections::HashMap<NanoID, Scene>,
+    pack_name: &'a str,
+    pack_author: &'a str,
+}
+
+fn emit_project_update<R: Runtime>(emitter: &impl Emitter<R>, prjct: &Package) {
+    let payload = ProjectUpdatePayload {
+        scenes: &prjct.scenes,
+        pack_name: &prjct.pack_name,
+        pack_author: &prjct.pack_author,
+    };
+    if let Err(e) = emitter.emit("on_project_update", &payload) {
+        error!("Failed to emit on_project_update: {}", e);
+    }
+}
+
 pub static PROJECT: Lazy<Mutex<Package>> = Lazy::new(|| {
     let prjct = Package::new();
     Mutex::new(prjct)
@@ -304,6 +322,8 @@ fn main() {
         .plugin(tauri_plugin_cli::init())
         .invoke_handler(tauri::generate_handler![
             request_project_update,
+            set_pack_name,
+            set_pack_author,
             get_race_keys,
             create_blank_scene,
             save_scene,
@@ -426,7 +446,7 @@ fn reload_project(reload_type: &str, window: &tauri::WebviewWindow) {
     }
     // Import leaves an unsaved in-memory project until Save As
     set_edited(reload_type == IMPORT_SLAL);
-    window.emit("on_project_update", &prjct.scenes).unwrap();
+    emit_project_update(window, &prjct);
 }
 
 fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
@@ -687,7 +707,7 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                     Ok(summary) => {
                         set_edited(true);
                         let window = app.get_webview_window(MAIN_WINDOW).unwrap();
-                        window.emit("on_project_update", &prjct.scenes).unwrap();
+                        emit_project_update(&window, &prjct);
                         let kind = if summary.positions_updated > 0 {
                             MessageDialogKind::Info
                         } else {
@@ -723,7 +743,17 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
 #[tauri::command]
 async fn request_project_update<R: Runtime>(window: tauri::Window<R>) -> () {
     let prjct = PROJECT.lock().unwrap();
-    window.emit("on_project_update", &prjct.scenes).unwrap();
+    emit_project_update(&window, &prjct);
+}
+
+#[tauri::command]
+fn set_pack_name(name: String) {
+    PROJECT.lock().unwrap().pack_name = name;
+}
+
+#[tauri::command]
+fn set_pack_author(author: String) {
+    PROJECT.lock().unwrap().pack_author = author;
 }
 
 #[tauri::command]

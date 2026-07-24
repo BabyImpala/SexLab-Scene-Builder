@@ -75,6 +75,8 @@ function App() {
   const [graph, setGraph] = useState(null);
   const [scenes, updateScenes] = useImmer([]);
   const [activeScene, updateActiveScene] = useImmer(null);
+  const [packName, setPackName] = useState('');
+  const [packAuthor, setPackAuthor] = useState('');
   const [edited, setEditedState] = useState(false);
   const editedRef = useRef(false);
   const setEdited = (v) => {
@@ -464,7 +466,8 @@ function App() {
   useEffect(() => {
     if (!graph) return;
     const unlisten = listen('on_project_update', (event) => {
-      const stage_map = event.payload;
+      const payload = event.payload || {};
+      const stage_map = payload.scenes ?? payload;
       const scns = [];
       for (const key in stage_map) {
         if (Object.hasOwnProperty.call(stage_map, key)) {
@@ -474,6 +477,8 @@ function App() {
       }
       console.log("Opening new Project with Scenes: ", scns);
       updateScenes(scns);
+      setPackName(payload.pack_name ?? '');
+      setPackAuthor(payload.pack_author ?? '');
       setEdited(false);
       if (scns.length) {
         setActiveScene(scns[0]);
@@ -1053,11 +1058,25 @@ function App() {
                   type="text"
                   placeholder="Package Name"
                   className="sidebar-form"
+                  value={packName}
+                  onChange={(e) => {
+                    const name = e.target.value;
+                    setPackName(name);
+                    invoke('set_pack_name', { name });
+                    setEdited(true);
+                  }}
                 />
                 <input
                   type="text"
                   placeholder="Author Name"
                   className="sidebar-form"
+                  value={packAuthor}
+                  onChange={(e) => {
+                    const author = e.target.value;
+                    setPackAuthor(author);
+                    invoke('set_pack_author', { author });
+                    setEdited(true);
+                  }}
                 />
                 <Divider id="sidebar-divider" />
                 <Menu

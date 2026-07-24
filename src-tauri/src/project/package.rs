@@ -675,6 +675,9 @@ impl Package {
     }
 
     fn set_project_name_from_path(&mut self, path: &PathBuf) -> () {
+        if !self.pack_name.is_empty() {
+            return;
+        }
         self.pack_name = String::from(
             path.file_name() // ...\\{project.slsb.json}
                 .and_then(|name| name.to_str())
