@@ -191,6 +191,7 @@ impl Package {
         let file = fs::File::create(&path).map_err(|e| e.to_string())?;
         serde_json::to_writer_pretty(BufWriter::new(file), self)
             .map_err(|e| e.to_string())?;
+        self.pack_path = path;
         println!("Saved project {}", self.pack_name);
         Ok(())
     }
