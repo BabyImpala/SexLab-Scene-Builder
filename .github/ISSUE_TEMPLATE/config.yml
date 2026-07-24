@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: SexLab P+ repository
+    url: https://github.com/SLP-Community/SexLabpp
+    about: Runtime / in-game SexLab P+ issues belong upstream, not here.
+  - name: SexLab Wiki
+    url: https://github.com/SLP-Community/SexLab-Wiki
+    about: Documentation and pack authoring guidance.

@@ -1,0 +1,58 @@
+name: Feature request
+description: Suggest an improvement or new capability for SexLab Scene Builder
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the capability you want in **SexLab Scene Builder**.
+
+        Runtime SexLab P+ features belong in [SexLabpp](https://github.com/Scrabx3/SexLabpp). Pack content / wiki docs belong in the wiki or the pack's own tracker.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - UI / editor
+        - Project format (.slsb)
+        - Import (SLAL → SLSB)
+        - Export / build
+        - SLAL export
+        - Behavior.hkx generation
+        - CLI
+        - Documentation / UX copy
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What is awkward, missing, or blocked today?
+      placeholder: As a pack author, I cannot …
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should SLSB do instead?
+      placeholder: Add … so that …
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds or other approaches you already tried.
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Mockups, example packs, related issues/PRs, etc.
