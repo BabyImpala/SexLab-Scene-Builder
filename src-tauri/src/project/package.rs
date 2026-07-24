@@ -457,10 +457,6 @@ impl Package {
                 }
             }
             scene.tags = tags;
-            let last = scene.stages.last_mut().unwrap();
-            for position in &mut last.positions {
-                position.extra.climax = true;
-            }
             // build graph
             scene.root = scene.stages[0].id.clone();
             let mut prev_id: Option<NanoID> = None;
@@ -471,6 +467,14 @@ impl Package {
                 }
                 scene.graph.insert(stage.id.clone(), value);
                 prev_id = Some(stage.id.clone());
+            }
+            // Mark climax after graph build (and keep top-level field for IPC;
+            // extra.climax is skip_serializing).
+            if let Some(last) = scene.stages.last_mut() {
+                for position in &mut last.positions {
+                    position.climax = true;
+                    position.extra.climax = true;
+                }
             }
             // add to prjct
             prjct.scenes.insert(scene.id.clone(), scene);

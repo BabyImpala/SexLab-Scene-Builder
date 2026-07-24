@@ -17,6 +17,7 @@ const { confirm } = Modal;
 import { STAGE_EDGE, STAGE_EDGE_SHAPEID } from "./scene/SceneEdge"
 import { Furnitures } from "./common/Furniture";
 import "./scene/SceneNode"
+import { NODE_WIDTH, NODE_HEIGHT } from "./scene/SceneNode"
 import "./App.css";
 // import "./Dark.css";
 import ScenePosition from "./scene/ScenePosition";
@@ -30,6 +31,27 @@ import TagTree from "./components/TagTree";
 import { remove } from "@tauri-apps/plugin-fs";
 
 const ZOOM_OPTIONS = { minScale: 0.25, maxScale: 5 };
+
+function buildStageEdgeConfig(sourceNode, targetNode) {
+  const sp = sourceNode.getPosition();
+  const tp = targetNode.getPosition();
+  const isWrap = tp.y > sp.y + 20 && tp.x + NODE_WIDTH < sp.x;
+  const edge = {
+    shape: STAGE_EDGE_SHAPEID,
+    source: { cell: sourceNode.id, port: 'out' },
+    target: { cell: targetNode.id, port: 'in' },
+  };
+  if (isWrap) {
+    const corridorY = sp.y + NODE_HEIGHT + (tp.y - sp.y - NODE_HEIGHT) / 2;
+    edge.router = { name: 'normal' };
+    edge.vertices = [
+      { x: sp.x + NODE_WIDTH + 24, y: sp.y + NODE_HEIGHT / 2 },
+      { x: sp.x + NODE_WIDTH + 24, y: corridorY },
+      { x: tp.x - 24, y: corridorY },
+    ];
+  }
+  return { edge, isWrap };
+}
 
 function graphGridArgs(dark) {
   return [
@@ -125,22 +147,14 @@ function App() {
         allowMulti: false,
         allowLoop: false,
         allowEdge: false,
-        allowPort: false,
+        allowPort: true,
         allowNode: true,
         createEdge() {
-          return new Shape.Edge(STAGE_EDGE);
+          return new Shape.Edge({
+            shape: STAGE_EDGE_SHAPEID,
+            ...STAGE_EDGE,
+          });
         },
-        // validateEdge({ edge, type, previous }) {
-        //   const source = this.getCellById(edge.source.cell);
-        //   if (source.prop('fixedLen')) {
-        //     const edges = this.getOutgoingEdges(source);
-        //     edges.forEach(it => {
-        //       if (it.id !== edge.id)
-        //         it.remove();
-        //     });
-        //   }
-        //   return true;
-        // }
       }
     })
       .zoomTo(1.0)
@@ -506,82 +520,81 @@ function App() {
     inEdit.current = true;
     graph.clearCells();
     updateActiveScene(newscene);
-    for (const [key, { x, y }] of Object.entries(newscene.graph || {})) {
+
+    const sceneGraph = newscene.graph || {};
+    const graphIds = Object.keys(sceneGraph);
+    // Place stacked SLAL/default graphs at layered coords before mount so
+    // X6 react HTML + edges never lock to a shared (40,40) origin.
+    const stacked = graphCoordsStacked(sceneGraph);
+    const layoutPositions = stacked
+      ? computeLayeredPositions(sceneGraph, newscene.root, graphIds)
+      : null;
+
+    for (const [key, { x, y }] of Object.entries(sceneGraph)) {
       const stage = newscene.stages.find((s) => s.id === key);
       if (!stage) {
         console.warn('Graph references missing stage', key, newscene);
         continue;
       }
-      const node = addStageToGraph(stage, x, y);
+      const pos = layoutPositions?.get(key) || { x, y };
+      const node = addStageToGraph(stage, pos.x, pos.y);
       updateNodeProps(stage, node, newscene);
     }
     const nodes = graph.getNodes();
-    for (const [sourceid, { dest }] of Object.entries(newscene.graph)) {
+    for (const [sourceid, { dest }] of Object.entries(sceneGraph)) {
       if (!dest.length) continue;
       const sourceNode = nodes.find(node => node.id === sourceid);
       if (!sourceNode) continue;
-      const sourcePort = sourceNode.ports.items[0];
       dest.forEach(targetid => {
         const target = nodes.find(node => node.id === targetid);
         if (!target) return;
-        graph.addEdge({
-          shape: STAGE_EDGE_SHAPEID,
-          source: {
-            cell: sourceNode,
-            port: sourcePort.id
-          },
-          target,
-        });
+        const { edge } = buildStageEdgeConfig(sourceNode, target);
+        graph.addEdge(edge);
       });
     }
-    // Converted / default graphs often stack every stage at (40, 40)
-    if (nodesAreStacked(nodes)) {
-      arrangeStages(newscene.root, false);
-    } else {
-      graph.centerContent();
-    }
     setEdited(false);
-    // Keep inEdit through any deferred layout/move events from zoom/center.
+    // Defer fit until after FO paint; wrap layout keeps bbox modest so
+    // zoomToFit does not collapse the view.
     requestAnimationFrame(() => {
-      inEdit.current = false;
-      setEdited(false);
+      requestAnimationFrame(() => {
+        try {
+          graph.resize();
+        } catch (_) { /* container may be mid-layout */ }
+        if (nodes.length) {
+          graph.zoomToFit({ padding: 32, maxScale: 1, minScale: 0.45 });
+          graph.centerContent();
+          graph.getEdges().forEach((edge) => {
+            const edgeView = graph.findViewByCell(edge);
+            if (edgeView) edgeView.update();
+          });
+        }
+        inEdit.current = false;
+        setEdited(false);
+      });
     });
   }
 
-  const gridSize = 200;
-  const LAYOUT_H_GAP = 220;
-  const LAYOUT_V_GAP = 140;
+  const gridSize = 260;
+  const LAYOUT_H_GAP = 280;
+  const LAYOUT_V_GAP = 150;
 
-  const nodesAreStacked = (nodes) => {
-    if (nodes.length < 2) return false;
-    const positions = nodes.map((n) => n.getPosition());
+  const graphCoordsStacked = (sceneGraph) => {
+    const positions = Object.values(sceneGraph || {}).map(({ x, y }) => ({ x, y }));
+    if (positions.length < 2) return false;
     const first = positions[0];
     return positions.every((p) => p.x === first.x && p.y === first.y);
   };
 
-  // Layered layout from the root following edge connections (left → right by depth)
-  const arrangeStages = (rootId = activeScene?.root, markEdited = true) => {
-    if (!graph) return;
-    const nodes = graph.getNodes();
-    if (!nodes.length) return;
-
-    const start =
-      nodes.find((n) => n.id === rootId) ||
-      nodes.find((n) => n.prop('isStart')) ||
-      nodes[0];
-
+  const computeLayeredPositions = (sceneGraph, rootId, nodeIds) => {
     const outgoing = new Map();
-    nodes.forEach((n) => {
-      const edges = graph.getOutgoingEdges(n) || [];
-      outgoing.set(
-        n.id,
-        edges.map((e) => e.getTargetCellId()).filter(Boolean)
-      );
+    nodeIds.forEach((id) => {
+      const dest = (sceneGraph[id]?.dest || []).filter((d) => nodeIds.includes(d));
+      outgoing.set(id, dest);
     });
-
+    const start = nodeIds.includes(rootId) ? rootId : nodeIds[0];
     const level = new Map();
-    const queue = [start.id];
-    level.set(start.id, 0);
+    const queue = start ? [start] : [];
+    if (start) level.set(start, 0);
     while (queue.length) {
       const id = queue.shift();
       for (const dest of outgoing.get(id) || []) {
@@ -591,39 +604,102 @@ function App() {
         }
       }
     }
-
-    const orphans = nodes.filter((n) => !level.has(n.id)).map((n) => n.id);
+    const orphans = nodeIds.filter((id) => !level.has(id));
     const byLevel = new Map();
     for (const [id, lv] of level) {
       if (!byLevel.has(lv)) byLevel.set(lv, []);
       byLevel.get(lv).push(id);
     }
 
-    for (const [lv, ids] of [...byLevel.entries()].sort((a, b) => a[0] - b[0])) {
-      ids.forEach((id, i) => {
-        const node = graph.getCellById(id);
-        if (node) {
-          node.setPosition(40 + lv * LAYOUT_H_GAP, 40 + i * LAYOUT_V_GAP);
-        }
-      });
+    const ordered = [];
+    for (const [, ids] of [...byLevel.entries()].sort((a, b) => a[0] - b[0])) {
+      ordered.push(...ids);
     }
+    ordered.push(...orphans);
 
-    // Unreachable nodes share one row under the main graph (avoid stretching width)
-    if (orphans.length) {
-      const maxRows = Math.max(
-        1,
-        ...[...byLevel.values()].map((ids) => ids.length),
-        0
-      );
-      const orphanY = 40 + maxRows * LAYOUT_V_GAP;
-      orphans.forEach((id, i) => {
-        const node = graph.getCellById(id);
-        if (node) {
-          node.setPosition(40 + i * LAYOUT_H_GAP, orphanY);
-        }
+    const linear =
+      orphans.length === 0 &&
+      [...byLevel.values()].every((ids) => ids.length <= 1);
+
+    const positions = new Map();
+    if (linear && ordered.length > 5) {
+      const rows = ordered.length > 14 ? Math.ceil(ordered.length / 5) : 2;
+      const cols = Math.ceil(ordered.length / rows);
+      ordered.forEach((id, i) => {
+        const row = Math.floor(i / cols);
+        const col = i % cols;
+        positions.set(id, {
+          x: 40 + col * LAYOUT_H_GAP,
+          y: 40 + row * LAYOUT_V_GAP,
+        });
       });
+    } else {
+      for (const [lv, ids] of [...byLevel.entries()].sort((a, b) => a[0] - b[0])) {
+        ids.forEach((id, i) => {
+          positions.set(id, {
+            x: 40 + lv * LAYOUT_H_GAP,
+            y: 40 + i * LAYOUT_V_GAP,
+          });
+        });
+      }
+      if (orphans.length) {
+        const maxRows = Math.max(
+          1,
+          ...[...byLevel.values()].map((ids) => ids.length),
+          0
+        );
+        const orphanY = 40 + maxRows * LAYOUT_V_GAP;
+        orphans.forEach((id, i) => {
+          positions.set(id, { x: 40 + i * LAYOUT_H_GAP, y: orphanY });
+        });
+      }
     }
+    return positions;
+  };
 
+  const arrangeStages = (rootId = activeScene?.root, markEdited = true) => {
+    if (!graph) return;
+    const nodes = graph.getNodes();
+    if (!nodes.length) return;
+
+    const sceneGraph = {};
+    nodes.forEach((n) => {
+      const edges = graph.getOutgoingEdges(n) || [];
+      sceneGraph[n.id] = {
+        dest: edges.map((e) => e.getTargetCellId()).filter(Boolean),
+        x: n.getPosition().x,
+        y: n.getPosition().y,
+      };
+    });
+    const start =
+      nodes.find((n) => n.id === rootId) ||
+      nodes.find((n) => n.prop('isStart')) ||
+      nodes[0];
+    const positions = computeLayeredPositions(
+      sceneGraph,
+      start.id,
+      nodes.map((n) => n.id)
+    );
+    for (const [id, pos] of positions) {
+      const node = graph.getCellById(id);
+      if (node) node.setPosition(pos.x, pos.y);
+    }
+    graph.getEdges().forEach((edge) => {
+      const source = edge.getSourceNode();
+      const target = edge.getTargetNode();
+      if (source && target) {
+        const { edge: cfg } = buildStageEdgeConfig(source, target);
+        if (cfg.vertices) {
+          edge.setRouter(cfg.router);
+          edge.setVertices(cfg.vertices);
+        } else {
+          edge.setRouter(STAGE_EDGE.router);
+          edge.setVertices([]);
+        }
+      }
+      const edgeView = graph.findViewByCell(edge);
+      if (edgeView) edgeView.update();
+    });
     graph.zoomToFit({ padding: 24, maxScale: 1 });
     graph.centerContent();
     if (markEdited) setEdited(true);
@@ -662,10 +738,15 @@ function App() {
   };
 
   const updateNodeProps = (stage, node, belongingScene) => {
+    const isOrgasm = !!(
+      stage.positions &&
+      stage.positions.some((p) => p.climax || p.extra?.climax)
+    );
     node.prop('stage', stage);
     node.prop('scene', belongingScene);
     node.prop('fixedLen', stage.extra.fixed_len);
     node.prop('isStart', belongingScene && belongingScene.root === stage.id);
+    node.prop('isOrgasm', isOrgasm);
   }
 
   const saveScene = () => {
