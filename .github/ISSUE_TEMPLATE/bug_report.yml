@@ -15,7 +15,7 @@ body:
     attributes:
       label: SLSB version
       description: App version from About, or the Git tag / commit if building from source.
-      placeholder: e.g. 2.0.0
+      placeholder: e.g. 3.0.0
     validations:
       required: true
 
