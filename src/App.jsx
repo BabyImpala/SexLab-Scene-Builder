@@ -470,8 +470,10 @@ function App() {
       setPackAuthor(payload.pack_author ?? '');
       setEdited(false);
       if (scns.length) {
-        setActiveScene(scns[0]);
+        // Show side panels before loading the scene so graph fit uses the
+        // final layout width (same as Edit from the sidebar).
         setShowAreas(true);
+        setActiveScene(scns[0]);
       } else {
         updateActiveScene(null);
         setShowAreas(false);
@@ -549,13 +551,21 @@ function App() {
       });
     }
     setEdited(false);
-    // Defer fit until after FO paint; wrap layout keeps bbox modest so
-    // zoomToFit does not collapse the view.
-    requestAnimationFrame(() => {
+    // Wait until the graph container is laid out. On first project/SLAL load the
+    // scene box was display:none and/or the tags panel is still mounting, so an
+    // immediate zoomToFit leaves nodes uncentered; Edit later works because the
+    // container already has a size.
+    const fitWhenReady = (retries = 30) => {
       requestAnimationFrame(() => {
         try {
           graph.resize();
         } catch (_) { /* container may be mid-layout */ }
+        const el = graph.container;
+        const ready = el && el.clientWidth > 0 && el.clientHeight > 0;
+        if (!ready && retries > 0) {
+          fitWhenReady(retries - 1);
+          return;
+        }
         if (nodes.length) {
           graph.zoomToFit({ padding: 32, maxScale: 1, minScale: 0.45 });
           graph.centerContent();
@@ -567,7 +577,8 @@ function App() {
         inEdit.current = false;
         setEdited(false);
       });
-    });
+    };
+    fitWhenReady();
   }
 
   const gridSize = 260;
