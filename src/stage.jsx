@@ -193,7 +193,10 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
     const onKeyDown = (e) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        getCurrentWindow().close();
+        e.stopPropagation();
+        getCurrentWindow()
+          .close()
+          .catch((err) => console.error('Failed to close stage editor', err));
         return;
       }
       if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) {
@@ -207,8 +210,9 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
       e.preventDefault();
       saveAndReturnRef.current();
     };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    // Capture so Escape is not swallowed by Ant Select/dropdowns first.
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
   }, []);
 
   const onPositionTabEdit = (targetKey, action) => {
