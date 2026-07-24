@@ -14,17 +14,26 @@ function TagTree({
   ...selectProps
 }) {
   const [userTags, setUserTags] = useState(() => loadUserTags());
+  const [searchValue, setSearchValue] = useState('');
   const presets = useMemo(
     () => [...tagsSFW, ...tagsNSFW],
     [tagsSFW, tagsNSFW]
   );
-  const presetKeys = useMemo(
-    () => new Set(presets.map(tagKey)),
+  const presetByKey = useMemo(
+    () => new Map(presets.map((tag) => [tagKey(tag), tag])),
     [presets]
   );
+  const presetKeys = useMemo(
+    () => new Set(presetByKey.keys()),
+    [presetByKey]
+  );
 
-  // Keep every custom value in the Yours group so Ant Design mode="tags"
-  // does not invent orphan top-level options that pile up until remount.
+  const canonicalize = (tag) => {
+    const trimmed = String(tag ?? '').trim();
+    if (!trimmed) return '';
+    return presetByKey.get(tagKey(trimmed)) ?? trimmed;
+  };
+
   const yoursOptions = useMemo(() => {
     const byKey = new Map();
     for (const tag of userTags) {
@@ -40,7 +49,19 @@ function TagTree({
     return [...byKey.values()].sort((a, b) => a.localeCompare(b));
   }, [userTags, tags, presetKeys]);
 
+  const pendingCreate = useMemo(() => {
+    const trimmed = searchValue.trim();
+    if (!trimmed) return null;
+    const key = tagKey(trimmed);
+    if (presetKeys.has(key)) return null;
+    if (yoursOptions.some((tag) => tagKey(tag) === key)) return null;
+    return trimmed;
+  }, [searchValue, presetKeys, yoursOptions]);
+
   const options = useMemo(() => {
+    const yours = pendingCreate
+      ? [...yoursOptions, pendingCreate]
+      : yoursOptions;
     const groups = [
       {
         label: 'SFW',
@@ -51,44 +72,76 @@ function TagTree({
         options: tagsNSFW.map((tag) => ({ value: tag, label: tag })),
       },
     ];
-    if (yoursOptions.length) {
+    if (yours.length) {
       groups.push({
         label: 'Yours',
-        options: yoursOptions.map((tag) => ({ value: tag, label: tag })),
+        options: yours.map((tag) => ({ value: tag, label: tag })),
       });
     }
     return groups;
-  }, [tagsSFW, tagsNSFW, yoursOptions]);
+  }, [tagsSFW, tagsNSFW, yoursOptions, pendingCreate]);
 
-  const handleChange = (next) => {
+  const canonicalValue = useMemo(
+    () => (tags || []).map(canonicalize).filter(Boolean),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tags, presetByKey]
+  );
+
+  const commitTags = (next) => {
     const cleaned = [];
     const seen = new Set();
     for (const tag of next || []) {
-      const trimmed = String(tag ?? '').trim();
-      if (!trimmed) continue;
-      const key = tagKey(trimmed);
+      const canonical = canonicalize(tag);
+      if (!canonical) continue;
+      const key = tagKey(canonical);
       if (seen.has(key)) continue;
       seen.add(key);
-      cleaned.push(trimmed);
+      cleaned.push(canonical);
     }
     setUserTags(rememberUserTags(cleaned, presets));
+    setSearchValue('');
     onChange(cleaned);
+  };
+
+  const tryCreateFromSearch = () => {
+    const trimmed = searchValue.trim();
+    if (!trimmed) return false;
+    const canonical = canonicalize(trimmed);
+    if (canonicalValue.some((tag) => tagKey(tag) === tagKey(canonical))) {
+      setSearchValue('');
+      return true;
+    }
+    commitTags([...canonicalValue, canonical]);
+    return true;
   };
 
   return (
     <Select
       className="tag-display-field"
       size="large"
-      mode="tags"
+      mode="multiple"
       showSearch
       allowClear
       placeholder="Search or create tags"
-      value={tags}
-      onChange={handleChange}
+      value={canonicalValue}
+      searchValue={searchValue}
+      onSearch={setSearchValue}
+      onChange={commitTags}
       options={options}
       optionFilterProp="label"
-      tokenSeparators={[',']}
       maxTagTextLength={20}
+      onInputKeyDown={(evt) => {
+        if (evt.key === ',') {
+          evt.preventDefault();
+          tryCreateFromSearch();
+          return;
+        }
+        if (evt.key === 'Enter' && pendingCreate) {
+          // Prefer creating the pending custom tag over selecting a partial match.
+          evt.preventDefault();
+          tryCreateFromSearch();
+        }
+      }}
       tagRender={({ label, value, closable, onClose }) => {
         const search = String(value).toLowerCase();
         const color = tagsSFW.find((it) => it.toLowerCase() === search)
