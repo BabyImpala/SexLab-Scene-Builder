@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
-import { Select, Tag } from 'antd';
-import { loadUserTags, rememberUserTags } from '../common/userTags';
+import { Select, Tag, Modal, Input, Button, Space, Tooltip, message } from 'antd';
+import { EditOutlined, DeleteOutlined } from '@ant-design/icons';
+import { loadUserTags, rememberUserTags, removeUserTag, renameUserTag } from '../common/userTags';
 
 function tagKey(tag) {
   return String(tag).toLowerCase().replace(/\s+/g, '');
@@ -15,6 +16,8 @@ function TagTree({
 }) {
   const [userTags, setUserTags] = useState(() => loadUserTags());
   const [searchValue, setSearchValue] = useState('');
+  const [editingTag, setEditingTag] = useState(null);
+  const [editDraft, setEditDraft] = useState('');
   const presets = useMemo(
     () => [...tagsSFW, ...tagsNSFW],
     [tagsSFW, tagsNSFW]
@@ -27,12 +30,22 @@ function TagTree({
     () => new Set(presetByKey.keys()),
     [presetByKey]
   );
+  const savedKeys = useMemo(
+    () => new Set(userTags.map((tag) => tagKey(tag))),
+    [userTags]
+  );
 
   const canonicalize = (tag) => {
     const trimmed = String(tag ?? '').trim();
     if (!trimmed) return '';
     return presetByKey.get(tagKey(trimmed)) ?? trimmed;
   };
+
+  const canonicalValue = useMemo(
+    () => (tags || []).map(canonicalize).filter(Boolean),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tags, presetByKey]
+  );
 
   const yoursOptions = useMemo(() => {
     const byKey = new Map();
@@ -57,35 +70,6 @@ function TagTree({
     if (yoursOptions.some((tag) => tagKey(tag) === key)) return null;
     return trimmed;
   }, [searchValue, presetKeys, yoursOptions]);
-
-  const options = useMemo(() => {
-    const yours = pendingCreate
-      ? [...yoursOptions, pendingCreate]
-      : yoursOptions;
-    const groups = [
-      {
-        label: 'SFW',
-        options: tagsSFW.map((tag) => ({ value: tag, label: tag })),
-      },
-      {
-        label: 'NSFW',
-        options: tagsNSFW.map((tag) => ({ value: tag, label: tag })),
-      },
-    ];
-    if (yours.length) {
-      groups.push({
-        label: 'Yours',
-        options: yours.map((tag) => ({ value: tag, label: tag })),
-      });
-    }
-    return groups;
-  }, [tagsSFW, tagsNSFW, yoursOptions, pendingCreate]);
-
-  const canonicalValue = useMemo(
-    () => (tags || []).map(canonicalize).filter(Boolean),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tags, presetByKey]
-  );
 
   const commitTags = (next) => {
     const cleaned = [];
@@ -115,59 +99,192 @@ function TagTree({
     return true;
   };
 
-  return (
-    <Select
-      className="tag-display-field"
-      size="large"
-      mode="multiple"
-      showSearch
-      allowClear
-      placeholder="Search or create tags"
-      value={canonicalValue}
-      searchValue={searchValue}
-      onSearch={setSearchValue}
-      onChange={commitTags}
-      options={options}
-      optionFilterProp="label"
-      maxTagTextLength={20}
-      onInputKeyDown={(evt) => {
-        if (evt.key === ',') {
-          evt.preventDefault();
-          tryCreateFromSearch();
-          return;
-        }
-        if (evt.key === 'Enter' && pendingCreate) {
-          // Prefer creating the pending custom tag over selecting a partial match.
-          evt.preventDefault();
-          tryCreateFromSearch();
-        }
-      }}
-      tagRender={({ label, value, closable, onClose }) => {
-        const search = String(value).toLowerCase();
-        const color = tagsSFW.find((it) => it.toLowerCase() === search)
-          ? 'cyan'
-          : tagsNSFW.find((it) => it.toLowerCase() === search)
-            ? 'volcano'
-            : 'purple';
+  const stopRowSelect = (evt) => {
+    evt.preventDefault();
+    evt.stopPropagation();
+  };
 
-        const onPreventMouseDown = (evt) => {
-          evt.preventDefault();
-          evt.stopPropagation();
-        };
-        return (
-          <Tag
-            color={color}
-            onMouseDown={onPreventMouseDown}
-            closable={closable}
-            onClose={onClose}
-            style={{ margin: 2 }}
-          >
-            {label}
-          </Tag>
-        );
-      }}
-      {...selectProps}
-    />
+  const handleRemoveSaved = (tag, evt) => {
+    stopRowSelect(evt);
+    Modal.confirm({
+      title: 'Remove saved tag?',
+      content: `"${tag}" will be removed from your saved custom tags.`,
+      okText: 'Remove',
+      okType: 'danger',
+      onOk: () => {
+        setUserTags(removeUserTag(tag));
+        const next = (tags || []).filter((t) => tagKey(t) !== tagKey(tag));
+        if (next.length !== (tags || []).length) {
+          onChange(next);
+        }
+      },
+    });
+  };
+
+  const openRename = (tag, evt) => {
+    stopRowSelect(evt);
+    setEditingTag(tag);
+    setEditDraft(tag);
+  };
+
+  const applyRename = () => {
+    const nextList = renameUserTag(editingTag, editDraft, presets);
+    if (!nextList) {
+      message.error('Tag name is empty or already used.');
+      return;
+    }
+    setUserTags(nextList);
+    const oldKey = tagKey(editingTag);
+    const renamed = String(editDraft).trim();
+    const next = (tags || []).map((t) => (tagKey(t) === oldKey ? renamed : t));
+    if (next.some((t, i) => t !== (tags || [])[i])) {
+      onChange(next);
+    }
+    setEditingTag(null);
+    setEditDraft('');
+  };
+
+  const options = useMemo(() => {
+    const yours = pendingCreate
+      ? [...yoursOptions, pendingCreate]
+      : yoursOptions;
+    const groups = [
+      {
+        label: 'SFW',
+        options: tagsSFW.map((tag) => ({ value: tag, label: tag })),
+      },
+      {
+        label: 'NSFW',
+        options: tagsNSFW.map((tag) => ({ value: tag, label: tag })),
+      },
+    ];
+    if (yours.length) {
+      groups.push({
+        label: 'Yours',
+        options: yours.map((tag) => {
+          const isPending = pendingCreate && tag === pendingCreate;
+          const isSaved = !isPending && savedKeys.has(tagKey(tag));
+          if (!isSaved) {
+            return { value: tag, label: tag };
+          }
+          return {
+            value: tag,
+            label: (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 8,
+                }}
+              >
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {tag}
+                </span>
+                <Space size={0} onMouseDown={stopRowSelect} onClick={stopRowSelect}>
+                  <Tooltip title="Rename saved tag">
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<EditOutlined />}
+                      onMouseDown={stopRowSelect}
+                      onClick={(evt) => openRename(tag, evt)}
+                    />
+                  </Tooltip>
+                  <Tooltip title="Remove saved tag">
+                    <Button
+                      type="text"
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      onMouseDown={stopRowSelect}
+                      onClick={(evt) => handleRemoveSaved(tag, evt)}
+                    />
+                  </Tooltip>
+                </Space>
+              </div>
+            ),
+          };
+        }),
+      });
+    }
+    return groups;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tagsSFW, tagsNSFW, yoursOptions, pendingCreate, savedKeys, tags]);
+
+  return (
+    <>
+      <Select
+        className="tag-display-field"
+        size="large"
+        mode="multiple"
+        showSearch
+        allowClear
+        placeholder="Search or create tags"
+        value={canonicalValue}
+        searchValue={searchValue}
+        onSearch={setSearchValue}
+        onChange={commitTags}
+        options={options}
+        optionFilterProp="value"
+        maxTagTextLength={20}
+        onInputKeyDown={(evt) => {
+          if (evt.key === ',') {
+            evt.preventDefault();
+            tryCreateFromSearch();
+            return;
+          }
+          if (evt.key === 'Enter' && pendingCreate) {
+            evt.preventDefault();
+            tryCreateFromSearch();
+          }
+        }}
+        tagRender={({ label, value, closable, onClose }) => {
+          const search = String(value).toLowerCase();
+          const color = tagsSFW.find((it) => it.toLowerCase() === search)
+            ? 'cyan'
+            : tagsNSFW.find((it) => it.toLowerCase() === search)
+              ? 'volcano'
+              : 'purple';
+
+          const onPreventMouseDown = (evt) => {
+            evt.preventDefault();
+            evt.stopPropagation();
+          };
+          return (
+            <Tag
+              color={color}
+              onMouseDown={onPreventMouseDown}
+              closable={closable}
+              onClose={onClose}
+              style={{ margin: 2 }}
+            >
+              {typeof label === 'string' ? label : value}
+            </Tag>
+          );
+        }}
+        {...selectProps}
+      />
+      <Modal
+        title="Rename saved tag"
+        open={!!editingTag}
+        onCancel={() => {
+          setEditingTag(null);
+          setEditDraft('');
+        }}
+        onOk={applyRename}
+        okText="Save"
+        destroyOnClose
+      >
+        <Input
+          autoFocus
+          value={editDraft}
+          onChange={(e) => setEditDraft(e.target.value)}
+          onPressEnter={applyRename}
+          placeholder="Tag name"
+        />
+      </Modal>
+    </>
   );
 }
 
