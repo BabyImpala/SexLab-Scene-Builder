@@ -407,6 +407,11 @@ fn main() {
                         window.label(),
                     );
                 }
+                tauri::WindowEvent::Destroyed
+                    if window.label().starts_with("stage_editor_") =>
+                {
+                    unblock_main_if_no_stage_editors(window.app_handle());
+                }
                 _ => {}
             }
         })
@@ -824,6 +829,28 @@ struct EditorPayload {
     pub dark: bool,
 }
 
+fn any_stage_editor_open<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.webview_windows()
+        .keys()
+        .any(|label| label.starts_with("stage_editor_"))
+}
+
+fn set_main_window_blocked<R: Runtime>(app: &AppHandle<R>, blocked: bool) {
+    let Some(main) = app.get_webview_window(MAIN_WINDOW) else {
+        return;
+    };
+    let _ = main.set_enabled(!blocked);
+    if !blocked {
+        let _ = main.set_focus();
+    }
+}
+
+fn unblock_main_if_no_stage_editors<R: Runtime>(app: &AppHandle<R>) {
+    if !any_stage_editor_open(app) {
+        set_main_window_blocked(app, false);
+    }
+}
+
 fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: EditorPayload) {
     let stage = &payload.stage;
     let label = format!("stage_editor_{}", stage.id.0);
@@ -833,13 +860,18 @@ fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: Editor
     );
     // Reopening the same stage: focus and re-send payload (recovers empty first open).
     if let Some(existing) = app.get_webview_window(&label) {
+        set_main_window_blocked(app, true);
         let _ = existing.set_focus();
         if let Err(e) = existing.emit("on_data_received", payload.clone()) {
             error!("Failed to re-send stage editor payload: {}", e);
         }
         return;
     }
-    let window = match WebviewWindowBuilder::new(
+    let Some(main) = app.get_webview_window(MAIN_WINDOW) else {
+        error!("Cannot open stage editor: main window missing");
+        return;
+    };
+    let builder = WebviewWindowBuilder::new(
         app,
         label,
         tauri::WebviewUrl::App("./stage.html".into()),
@@ -854,9 +886,15 @@ fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: Editor
     ))
     .min_inner_size(720.0, 540.0)
     .inner_size(1152.0, 864.0)
-    .resizable(true)
-    .build()
-    {
+    .resizable(true);
+    let builder = match builder.parent(&main) {
+        Ok(b) => b,
+        Err(e) => {
+            error!("Failed to parent stage editor to main window: {}", e);
+            return;
+        }
+    };
+    let window = match builder.build() {
         Ok(w) => w,
         Err(e) => {
             error!(
@@ -866,6 +904,7 @@ fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: Editor
             return;
         }
     };
+    set_main_window_blocked(app, true);
     // Register before geometry restore: webview can emit before restore finishes.
     let theme_window = window.clone();
     window.clone().once("on_request_data", move |_| {

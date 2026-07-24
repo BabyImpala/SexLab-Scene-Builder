@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { emit, listen } from '@tauri-apps/api/event'
 import { invoke } from "@tauri-apps/api/core"
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import ReactDOM from "react-dom/client";
 import { useImmer } from "use-immer";
 import { FileDoneOutlined, TagsOutlined, SaveOutlined, TeamOutlined } from '@ant-design/icons';
@@ -184,6 +185,31 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
     console.log("Saving Stage... ", _sceneId, positionsInfo, stage);
     invoke('stage_save_and_close', { scene: _sceneId, positions: positionsInfo, stage });
   }
+
+  const saveAndReturnRef = useRef(saveAndReturn);
+  saveAndReturnRef.current = saveAndReturn;
+
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        getCurrentWindow().close();
+        return;
+      }
+      if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) {
+        return;
+      }
+      const target = e.target;
+      const tag = target?.tagName?.toLowerCase();
+      // Keep Enter for multiline fields and Ant Select tag entry.
+      if (tag === 'textarea') return;
+      if (target?.closest?.('.ant-select')) return;
+      e.preventDefault();
+      saveAndReturnRef.current();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   const onPositionTabEdit = (targetKey, action) => {
     if (action === 'add') {
