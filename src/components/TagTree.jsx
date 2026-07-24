@@ -2,6 +2,10 @@ import React, { useMemo, useState } from "react";
 import { Select, Tag } from 'antd';
 import { loadUserTags, rememberUserTags } from '../common/userTags';
 
+function tagKey(tag) {
+  return String(tag).toLowerCase().replace(/\s+/g, '');
+}
+
 function TagTree({
   tags,
   onChange,
@@ -14,6 +18,27 @@ function TagTree({
     () => [...tagsSFW, ...tagsNSFW],
     [tagsSFW, tagsNSFW]
   );
+  const presetKeys = useMemo(
+    () => new Set(presets.map(tagKey)),
+    [presets]
+  );
+
+  // Keep every custom value in the Yours group so Ant Design mode="tags"
+  // does not invent orphan top-level options that pile up until remount.
+  const yoursOptions = useMemo(() => {
+    const byKey = new Map();
+    for (const tag of userTags) {
+      const trimmed = String(tag ?? '').trim();
+      if (!trimmed || presetKeys.has(tagKey(trimmed))) continue;
+      byKey.set(tagKey(trimmed), trimmed);
+    }
+    for (const tag of tags || []) {
+      const trimmed = String(tag ?? '').trim();
+      if (!trimmed || presetKeys.has(tagKey(trimmed))) continue;
+      byKey.set(tagKey(trimmed), trimmed);
+    }
+    return [...byKey.values()].sort((a, b) => a.localeCompare(b));
+  }, [userTags, tags, presetKeys]);
 
   const options = useMemo(() => {
     const groups = [
@@ -26,14 +51,14 @@ function TagTree({
         options: tagsNSFW.map((tag) => ({ value: tag, label: tag })),
       },
     ];
-    if (userTags.length) {
+    if (yoursOptions.length) {
       groups.push({
         label: 'Yours',
-        options: userTags.map((tag) => ({ value: tag, label: tag })),
+        options: yoursOptions.map((tag) => ({ value: tag, label: tag })),
       });
     }
     return groups;
-  }, [tagsSFW, tagsNSFW, userTags]);
+  }, [tagsSFW, tagsNSFW, yoursOptions]);
 
   const handleChange = (next) => {
     const cleaned = [];
@@ -41,7 +66,7 @@ function TagTree({
     for (const tag of next || []) {
       const trimmed = String(tag ?? '').trim();
       if (!trimmed) continue;
-      const key = trimmed.toLowerCase().replace(/\s+/g, '');
+      const key = tagKey(trimmed);
       if (seen.has(key)) continue;
       seen.add(key);
       cleaned.push(trimmed);
