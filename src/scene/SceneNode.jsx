@@ -266,7 +266,7 @@ register({
       },
     ],
   },
-  effect: ['name', 'isOrgasm', 'fixedLen', 'isStart'],
+  effect: ['name', 'stage', 'scene', 'isOrgasm', 'fixedLen', 'isStart'],
   component: StageNode,
 });
 
