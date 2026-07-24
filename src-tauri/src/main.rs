@@ -16,6 +16,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex,
 };
+
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuBuilder, MenuItem, SubmenuBuilder},
     AppHandle, Emitter, Listener, Manager, Runtime, Theme, WebviewWindowBuilder, Wry,
@@ -404,6 +405,7 @@ fn reload_project(reload_type: &str, window: &tauri::WebviewWindow) {
         IMPORT_SLAL => prjct.load_slal(window.app_handle()),
         _ => Err(format!("Invalid reload type: {}", reload_type)),
     };
+
     if let Err(e) = result {
         error!("{}", e);
         window
@@ -562,6 +564,14 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                 OPEN_PROJECT => "Open Project",
                 _ => "Import SLAL",
             };
+            // blocking_* dialogs must not run on the GTK menu/main thread (Linux freeze).
+            let start_reload = move || {
+                let event_id = event_id.clone();
+                let window = window.clone();
+                tauri::async_runtime::spawn(async move {
+                    reload_project(&event_id, &window);
+                });
+            };
             if get_edited() {
                 app.dialog()
                     .message("There are unsaved changes. Loading a new project will cause these changes to be lost.\nContinue?")
@@ -569,23 +579,27 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                     .buttons(MessageDialogButtons::YesNo)
                     .kind(MessageDialogKind::Warning)
                     .show(move |result| match result {
-                        true => reload_project(&event_id, &window),
+                        true => start_reload(),
                         false => info!("User cancelled the project reload.")
                     });
                 return;
             }
-            reload_project(&event_id, &window);
+            start_reload();
         }
         "save" | "save_as" => {
-            let mut prjct = PROJECT.lock().unwrap();
-            if let Err(err) = prjct.save_project(event.id().0 == "save_as", app) {
-                error!("Failed to save project: {}", err);
-                return;
-            }
-            set_edited(false);
-            let window = app.get_webview_window(MAIN_WINDOW).unwrap();
-            let _ = window
-                .set_title(format!("{} - {}", DEFAULT_MAINWINDOW_TITLE, prjct.pack_name).as_str());
+            let save_as = event.id().0 == "save_as";
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut prjct = PROJECT.lock().unwrap();
+                if let Err(err) = prjct.save_project(save_as, &app) {
+                    error!("Failed to save project: {}", err);
+                    return;
+                }
+                set_edited(false);
+                let window = app.get_webview_window(MAIN_WINDOW).unwrap();
+                let _ = window
+                    .set_title(format!("{} - {}", DEFAULT_MAINWINDOW_TITLE, prjct.pack_name).as_str());
+            });
         }
         "export_both" | "export_slsb" | "export_slal" => {
             let kind = match event.id().0.as_str() {
@@ -593,16 +607,19 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                 "export_slal" => ExportKind::Slal,
                 _ => ExportKind::Both,
             };
-            let prjct = PROJECT.lock().unwrap();
-            if let Err(err) = prjct.export_as(app, kind) {
-                error!("Failed to export project: {}", err);
-                app.dialog()
-                    .message(&err)
-                    .title("Export failed")
-                    .kind(MessageDialogKind::Error)
-                    .buttons(MessageDialogButtons::Ok)
-                    .show(|_| {});
-            }
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let prjct = PROJECT.lock().unwrap();
+                if let Err(err) = prjct.export_as(&app, kind) {
+                    error!("Failed to export project: {}", err);
+                    app.dialog()
+                        .message(&err)
+                        .title("Export failed")
+                        .kind(MessageDialogKind::Error)
+                        .buttons(MessageDialogButtons::Ok)
+                        .show(|_| {});
+                }
+            });
         }
         THEME_SYSTEM => {
             apply_system_theme(app);
@@ -654,40 +671,46 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                 .open_url("https://ko-fi.com/scrab", Option::<String>::None);
         }
         "import_offset" => {
-            let mut prjct = PROJECT.lock().unwrap();
-            if let Err(err) = prjct.import_offset(app) {
-                error!("{}", err);
-            }
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut prjct = PROJECT.lock().unwrap();
+                if let Err(err) = prjct.import_offset(&app) {
+                    error!("{}", err);
+                }
+            });
         }
         ENRICH_SLANIM => {
-            let mut prjct = PROJECT.lock().unwrap();
-            match prjct.enrich_from_slanim_source(app) {
-                Ok(summary) => {
-                    set_edited(true);
-                    let window = app.get_webview_window(MAIN_WINDOW).unwrap();
-                    window.emit("on_project_update", &prjct.scenes).unwrap();
-                    let kind = if summary.positions_updated > 0 {
-                        MessageDialogKind::Info
-                    } else {
-                        MessageDialogKind::Warning
-                    };
-                    app.dialog()
-                        .message(summary.message())
-                        .title("Enrich from SLAnim source")
-                        .kind(kind)
-                        .buttons(MessageDialogButtons::Ok)
-                        .show(|_| {});
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut prjct = PROJECT.lock().unwrap();
+                match prjct.enrich_from_slanim_source(&app) {
+                    Ok(summary) => {
+                        set_edited(true);
+                        let window = app.get_webview_window(MAIN_WINDOW).unwrap();
+                        window.emit("on_project_update", &prjct.scenes).unwrap();
+                        let kind = if summary.positions_updated > 0 {
+                            MessageDialogKind::Info
+                        } else {
+                            MessageDialogKind::Warning
+                        };
+                        app.dialog()
+                            .message(summary.message())
+                            .title("Enrich from SLAnim source")
+                            .kind(kind)
+                            .buttons(MessageDialogButtons::Ok)
+                            .show(|_| {});
+                    }
+                    Err(err) => {
+                        error!("{}", err);
+                        app.dialog()
+                            .message(&err)
+                            .title("Enrich failed")
+                            .kind(MessageDialogKind::Error)
+                            .buttons(MessageDialogButtons::Ok)
+                            .show(|_| {});
+                    }
                 }
-                Err(err) => {
-                    error!("{}", err);
-                    app.dialog()
-                        .message(&err)
-                        .title("Enrich failed")
-                        .kind(MessageDialogKind::Error)
-                        .buttons(MessageDialogButtons::Ok)
-                        .show(|_| {});
-                }
-            }
+            });
         }
         _ => {
             error!("Unrecognized command: {}", event.id().0)
