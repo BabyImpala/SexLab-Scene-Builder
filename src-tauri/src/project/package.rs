@@ -89,7 +89,7 @@ impl Package {
             version: VERSION, // current version
             pack_path: Default::default(),
             pack_name: Default::default(),
-            pack_author: "Unknown".into(),
+            pack_author: Default::default(),
             prefix_hash: NanoID::new_prefix(),
             scenes: IndexMap::new(),
         }
