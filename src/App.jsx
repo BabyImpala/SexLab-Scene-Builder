@@ -96,17 +96,6 @@ function App() {
     activeSceneRef.current = activeScene;
   }, [activeScene]);
 
-  // Hide Areas when sidebar is collapsed
-  useEffect(() => {
-    let unlisten;
-    listen('on_project_update', () => setShowAreas(false)).then((fn) => {
-      unlisten = fn;
-    });
-    return () => {
-      if (unlisten) unlisten();
-    };
-  }, []);
-
   function generatePositionId() {
     return `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   }
@@ -482,8 +471,10 @@ function App() {
       setEdited(false);
       if (scns.length) {
         setActiveScene(scns[0]);
+        setShowAreas(true);
       } else {
         updateActiveScene(null);
+        setShowAreas(false);
       }
     });
     invoke('request_project_update');
