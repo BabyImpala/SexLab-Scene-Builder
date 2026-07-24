@@ -6,6 +6,7 @@ mod cli;
 mod furniture;
 mod project;
 mod racekeys;
+mod window_geometry;
 
 use log::{error, info};
 use once_cell::sync::Lazy;
@@ -15,9 +16,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex,
 };
+
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuBuilder, MenuItem, SubmenuBuilder},
-    AppHandle, Emitter, Listener, Manager, Runtime, WebviewWindowBuilder, Wry,
+    AppHandle, Emitter, Listener, Manager, Runtime, Theme, WebviewWindowBuilder, Wry,
 };
 use tauri_plugin_cli::CliExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -26,6 +28,24 @@ use tauri_plugin_opener::OpenerExt;
 use crate::project::position_info::PositionInfo;
 
 const DEFAULT_MAINWINDOW_TITLE: &str = "SexLab Scene Builder";
+
+#[derive(Debug, Serialize, Clone)]
+struct ProjectUpdatePayload<'a> {
+    scenes: &'a indexmap::IndexMap<NanoID, Scene>,
+    pack_name: &'a str,
+    pack_author: &'a str,
+}
+
+fn emit_project_update<R: Runtime>(emitter: &impl Emitter<R>, prjct: &Package) {
+    let payload = ProjectUpdatePayload {
+        scenes: &prjct.scenes,
+        pack_name: &prjct.pack_name,
+        pack_author: &prjct.pack_author,
+    };
+    if let Err(e) = emitter.emit("on_project_update", &payload) {
+        error!("Failed to emit on_project_update: {}", e);
+    }
+}
 
 pub static PROJECT: Lazy<Mutex<Package>> = Lazy::new(|| {
     let prjct = Package::new();
@@ -50,6 +70,209 @@ fn set_darkmode(val: bool) -> () {
 #[inline]
 fn get_darkmode() -> bool {
     IS_DARKMODE.load(Ordering::Relaxed)
+}
+
+static FOLLOW_OS_THEME: AtomicBool = AtomicBool::new(true);
+#[inline]
+fn set_follow_os_theme(val: bool) {
+    FOLLOW_OS_THEME.store(val, Ordering::Relaxed)
+}
+#[inline]
+fn get_follow_os_theme() -> bool {
+    FOLLOW_OS_THEME.load(Ordering::Relaxed)
+}
+
+/// Cached OS dark/light. After forced Light, Tao's theme() can still report Light
+/// until the stripped GTK name is restored — needed when returning to System.
+static LAST_OS_DARK: AtomicBool = AtomicBool::new(false);
+#[inline]
+fn set_last_os_dark(val: bool) {
+    LAST_OS_DARK.store(val, Ordering::Relaxed)
+}
+#[inline]
+fn get_last_os_dark() -> bool {
+    LAST_OS_DARK.load(Ordering::Relaxed)
+}
+
+#[cfg(target_os = "linux")]
+static SAVED_GTK_THEME: Mutex<Option<String>> = Mutex::new(None);
+
+#[cfg(target_os = "linux")]
+const GTK_DARK_SUFFIXES: &[&str] = &["-dark", "-Dark", ":dark", "-darker", "-Darker"];
+
+fn theme_for(is_dark: bool) -> Theme {
+    if is_dark {
+        Theme::Dark
+    } else {
+        Theme::Light
+    }
+}
+
+fn set_menu_checked<R: Runtime>(submenu: &tauri::menu::Submenu<R>, id: &str, checked: bool) {
+    if let Some(item) = submenu.get(id) {
+        if let Some(check) = item.as_check_menuitem() {
+            let _ = check.set_checked(checked);
+        }
+    }
+}
+
+fn theme_submenu_from_menu<R: Runtime>(menu: &Menu<R>) -> Option<tauri::menu::Submenu<R>> {
+    let items = menu.items().ok()?;
+    for item in items {
+        let Some(view) = item.as_submenu() else {
+            continue;
+        };
+        if view.get(THEME_SYSTEM).is_some() {
+            return Some(view.clone());
+        }
+        if let Ok(subs) = view.items() {
+            for sub in subs {
+                if let Some(theme_menu) = sub.as_submenu() {
+                    if theme_menu.get(THEME_SYSTEM).is_some() {
+                        return Some(theme_menu.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn update_theme_menu<R: Runtime>(app: &AppHandle<R>) {
+    // Menu is attached to the main window, not the app handle.
+    let menu = app
+        .get_webview_window(MAIN_WINDOW)
+        .and_then(|w| w.menu())
+        .or_else(|| app.menu());
+    let Some(menu) = menu else {
+        return;
+    };
+    let Some(theme_menu) = theme_submenu_from_menu(&menu) else {
+        return;
+    };
+
+    let follow = get_follow_os_theme();
+    let is_dark = get_darkmode();
+    set_menu_checked(&theme_menu, THEME_SYSTEM, follow);
+    set_menu_checked(&theme_menu, THEME_LIGHT, !follow && !is_dark);
+    set_menu_checked(&theme_menu, THEME_DARK, !follow && is_dark);
+}
+
+#[cfg(target_os = "linux")]
+fn restore_saved_gtk_theme(settings: &gtk::Settings) {
+    use gtk::prelude::GtkSettingsExt;
+    if let Ok(mut saved) = SAVED_GTK_THEME.lock() {
+        if let Some(name) = saved.take() {
+            settings.set_gtk_theme_name(Some(name.as_str()));
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn apply_linux_gtk_theme(follow_os: bool, is_dark: bool) {
+    use gtk::prelude::GtkSettingsExt;
+
+    let Some(settings) = gtk::Settings::default() else {
+        return;
+    };
+
+    if follow_os || is_dark {
+        settings.set_gtk_application_prefer_dark_theme(is_dark);
+        restore_saved_gtk_theme(&settings);
+        return;
+    }
+
+    // Tao's set_theme(Light) only clears prefer-dark; strip *-dark for light CSD.
+    settings.set_gtk_application_prefer_dark_theme(false);
+    if let Some(theme) = settings.gtk_theme_name() {
+        let name = theme.as_str();
+        if let Some(base) = GTK_DARK_SUFFIXES
+            .iter()
+            .find_map(|suffix| name.strip_suffix(suffix))
+        {
+            if let Ok(mut saved) = SAVED_GTK_THEME.lock() {
+                if saved.is_none() {
+                    *saved = Some(name.to_string());
+                }
+            }
+            settings.set_gtk_theme_name(Some(base));
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_linux_gtk_theme(_follow_os: bool, _is_dark: bool) {}
+
+fn apply_window_chrome_theme<R: Runtime>(app: &AppHandle<R>, follow_os: bool, is_dark: bool) {
+    let theme = if follow_os {
+        None
+    } else {
+        Some(theme_for(is_dark))
+    };
+    app.set_theme(theme);
+    for window in app.webview_windows().values() {
+        let _ = window.set_theme(theme);
+    }
+    apply_linux_gtk_theme(follow_os, is_dark);
+}
+
+fn apply_color_theme<R: Runtime>(app: &AppHandle<R>, is_dark: bool, follow_os: bool) {
+    set_follow_os_theme(follow_os);
+    set_darkmode(is_dark);
+    apply_window_chrome_theme(app, follow_os, is_dark);
+    update_theme_menu(app);
+    if let Err(err) = app.emit("toggle_darkmode", is_dark) {
+        error!("Unable to emit theme change: {}", err);
+    }
+}
+
+/// Restore GTK before clearing preferred_theme so theme() can see *-dark again.
+fn apply_system_theme<R: Runtime>(app: &AppHandle<R>) {
+    let cached_os_dark = get_last_os_dark();
+    apply_linux_gtk_theme(true, cached_os_dark);
+    app.set_theme(None);
+    for window in app.webview_windows().values() {
+        let _ = window.set_theme(None);
+    }
+    let os_dark = app
+        .get_webview_window(MAIN_WINDOW)
+        .and_then(|w| w.theme().ok())
+        .map(|t| matches!(t, Theme::Dark))
+        .unwrap_or(cached_os_dark);
+    set_last_os_dark(os_dark);
+    apply_color_theme(app, os_dark, true);
+}
+
+fn apply_os_theme_event<R: Runtime>(app: &AppHandle<R>, theme: Theme) {
+    let is_dark = matches!(theme, Theme::Dark);
+    if !get_follow_os_theme() {
+        // Re-assert forced chrome; do not treat this as an OS theme sample.
+        apply_window_chrome_theme(app, false, get_darkmode());
+        return;
+    }
+    set_last_os_dark(is_dark);
+    if get_darkmode() == is_dark {
+        update_theme_menu(app);
+        return;
+    }
+    set_darkmode(is_dark);
+    update_theme_menu(app);
+    if let Err(err) = app.emit("toggle_darkmode", is_dark) {
+        error!("Unable to emit OS theme change: {}", err);
+    }
+}
+
+fn sync_theme_from_window<R: Runtime>(window: &tauri::WebviewWindow<R>) {
+    match window.theme() {
+        Ok(theme) => {
+            if get_follow_os_theme() {
+                apply_os_theme_event(window.app_handle(), theme);
+            } else {
+                apply_window_chrome_theme(window.app_handle(), false, get_darkmode());
+            }
+        }
+        Err(err) => error!("Unable to read window theme: {}", err),
+    }
 }
 
 fn setup_logger() -> Result<(), fern::InitError> {
@@ -81,7 +304,14 @@ const NEW_PROJECT: &str = "new_prjct";
 const OPEN_PROJECT: &str = "open_prjct";
 const IMPORT_SLAL: &str = "import_slal";
 const ENRICH_SLANIM: &str = "enrich_slanim";
-const DARKMODE: &str = "darkmode";
+const THEME_SYSTEM: &str = "theme_system";
+const THEME_LIGHT: &str = "theme_light";
+const THEME_DARK: &str = "theme_dark";
+
+fn save_and_exit<R: Runtime>(app: &AppHandle<R>) {
+    window_geometry::save_all_window_geometry(app);
+    app.exit(0);
+}
 
 fn main() {
     setup_logger().expect("Unable to initialize logger");
@@ -92,6 +322,8 @@ fn main() {
         .plugin(tauri_plugin_cli::init())
         .invoke_handler(tauri::generate_handler![
             request_project_update,
+            set_pack_name,
+            set_pack_author,
             get_race_keys,
             create_blank_scene,
             save_scene,
@@ -120,8 +352,7 @@ fn main() {
                 // (needed for headless generate-behaviors / CI smoke tests).
                 std::process::exit(res.is_err() as i32);
             }
-            let app_handle = app.app_handle().clone();
-            WebviewWindowBuilder::new(
+            let main_window = WebviewWindowBuilder::new(
                 app.app_handle(),
                 MAIN_WINDOW.to_string(),
                 tauri::WebviewUrl::App("./index.html".into()),
@@ -131,10 +362,58 @@ fn main() {
             .min_inner_size(800.0, 500.0)
             .inner_size(1280.0, 720.0)
             .build()
-            .expect("Failed to create main window")
-            .on_window_event(move |event| window_event_listener(&app_handle, event));
+            .expect("Failed to create main window");
+            window_geometry::restore_window_geometry(&main_window);
+            set_follow_os_theme(true);
+            app.app_handle().set_theme(None);
+            sync_theme_from_window(&main_window);
             app.on_menu_event(menu_event_listener);
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            match event {
+                tauri::WindowEvent::ThemeChanged(theme) => {
+                    apply_os_theme_event(window.app_handle(), *theme);
+                }
+                tauri::WindowEvent::CloseRequested { api, .. }
+                    if window.label() == MAIN_WINDOW =>
+                {
+                    // Always prevent first — blocking dialogs on the GTK main thread
+                    // freeze the app on Linux (especially after a second webview existed).
+                    api.prevent_close();
+                    let app = window.app_handle().clone();
+                    if get_edited() {
+                        app.dialog()
+                            .message(
+                                "There are unsaved changes. Are you sure you want to close?",
+                            )
+                            .title("Close")
+                            .buttons(MessageDialogButtons::YesNo)
+                            .kind(MessageDialogKind::Warning)
+                            .show(move |should_close| {
+                                if should_close {
+                                    save_and_exit(&app);
+                                }
+                            });
+                    } else {
+                        save_and_exit(&app);
+                    }
+                }
+                tauri::WindowEvent::CloseRequested { .. }
+                    if window.label().starts_with("stage_editor_") =>
+                {
+                    window_geometry::save_window_geometry_by_label(
+                        window.app_handle(),
+                        window.label(),
+                    );
+                }
+                tauri::WindowEvent::Destroyed
+                    if window.label().starts_with("stage_editor_") =>
+                {
+                    unblock_main_if_no_stage_editors(window.app_handle());
+                }
+                _ => {}
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -151,6 +430,7 @@ fn reload_project(reload_type: &str, window: &tauri::WebviewWindow) {
         IMPORT_SLAL => prjct.load_slal(window.app_handle()),
         _ => Err(format!("Invalid reload type: {}", reload_type)),
     };
+
     if let Err(e) = result {
         error!("{}", e);
         window
@@ -171,7 +451,7 @@ fn reload_project(reload_type: &str, window: &tauri::WebviewWindow) {
     }
     // Import leaves an unsaved in-memory project until Save As
     set_edited(reload_type == IMPORT_SLAL);
-    window.emit("on_project_update", &prjct.scenes).unwrap();
+    emit_project_update(window, &prjct);
 }
 
 fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
@@ -255,15 +535,34 @@ fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
         .separator()
         .quit()
         .build()?;
-    let view_menu = SubmenuBuilder::new(app, "View")
+    let theme_menu = SubmenuBuilder::new(app, "Theme")
         .item(&CheckMenuItem::with_id(
             app,
-            DARKMODE,
-            "Dark Mode",
+            THEME_SYSTEM,
+            "System",
             true,
-            get_darkmode(),
+            get_follow_os_theme(),
             Option::<&str>::None,
         )?)
+        .item(&CheckMenuItem::with_id(
+            app,
+            THEME_LIGHT,
+            "Light",
+            true,
+            !get_follow_os_theme() && !get_darkmode(),
+            Option::<&str>::None,
+        )?)
+        .item(&CheckMenuItem::with_id(
+            app,
+            THEME_DARK,
+            "Dark",
+            true,
+            !get_follow_os_theme() && get_darkmode(),
+            Option::<&str>::None,
+        )?)
+        .build()?;
+    let view_menu = SubmenuBuilder::new(app, "View")
+        .item(&theme_menu)
         .build()?;
     let help_menu = SubmenuBuilder::new(app, "Help")
         .text("open_docs", "Open Wiki")
@@ -290,6 +589,14 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                 OPEN_PROJECT => "Open Project",
                 _ => "Import SLAL",
             };
+            // blocking_* dialogs must not run on the GTK menu/main thread (Linux freeze).
+            let start_reload = move || {
+                let event_id = event_id.clone();
+                let window = window.clone();
+                tauri::async_runtime::spawn(async move {
+                    reload_project(&event_id, &window);
+                });
+            };
             if get_edited() {
                 app.dialog()
                     .message("There are unsaved changes. Loading a new project will cause these changes to be lost.\nContinue?")
@@ -297,23 +604,32 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                     .buttons(MessageDialogButtons::YesNo)
                     .kind(MessageDialogKind::Warning)
                     .show(move |result| match result {
-                        true => reload_project(&event_id, &window),
+                        true => start_reload(),
                         false => info!("User cancelled the project reload.")
                     });
                 return;
             }
-            reload_project(&event_id, &window);
+            start_reload();
         }
         "save" | "save_as" => {
-            let mut prjct = PROJECT.lock().unwrap();
-            if let Err(err) = prjct.save_project(event.id().0 == "save_as", app) {
-                error!("Failed to save project: {}", err);
-                return;
-            }
-            set_edited(false);
-            let window = app.get_webview_window(MAIN_WINDOW).unwrap();
-            let _ = window
-                .set_title(format!("{} - {}", DEFAULT_MAINWINDOW_TITLE, prjct.pack_name).as_str());
+            let save_as = event.id().0 == "save_as";
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut prjct = PROJECT.lock().unwrap();
+                if let Err(err) = prjct.save_project(save_as, &app) {
+                    error!("Failed to save project: {}", err);
+                    return;
+                }
+                set_edited(false);
+                let window = app.get_webview_window(MAIN_WINDOW).unwrap();
+                if prjct.pack_name.is_empty() {
+                    let _ = window.set_title(DEFAULT_MAINWINDOW_TITLE);
+                } else {
+                    let _ = window.set_title(
+                        format!("{} - {}", DEFAULT_MAINWINDOW_TITLE, prjct.pack_name).as_str(),
+                    );
+                }
+            });
         }
         "export_both" | "export_slsb" | "export_slal" => {
             let kind = match event.id().0.as_str() {
@@ -321,23 +637,28 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                 "export_slal" => ExportKind::Slal,
                 _ => ExportKind::Both,
             };
-            let prjct = PROJECT.lock().unwrap();
-            if let Err(err) = prjct.export_as(app, kind) {
-                error!("Failed to export project: {}", err);
-                app.dialog()
-                    .message(&err)
-                    .title("Export failed")
-                    .kind(MessageDialogKind::Error)
-                    .buttons(MessageDialogButtons::Ok)
-                    .show(|_| {});
-            }
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let prjct = PROJECT.lock().unwrap();
+                if let Err(err) = prjct.export_as(&app, kind) {
+                    error!("Failed to export project: {}", err);
+                    app.dialog()
+                        .message(&err)
+                        .title("Export failed")
+                        .kind(MessageDialogKind::Error)
+                        .buttons(MessageDialogButtons::Ok)
+                        .show(|_| {});
+                }
+            });
         }
-        DARKMODE => {
-            let new_darkmode = !get_darkmode();
-            set_darkmode(new_darkmode);
-            if let Err(err) = app.emit("toggle_darkmode", new_darkmode) {
-                error!("Unable to toggle darkmode, event failure: {}", err);
-            }
+        THEME_SYSTEM => {
+            apply_system_theme(app);
+        }
+        THEME_LIGHT => {
+            apply_color_theme(app, false, false);
+        }
+        THEME_DARK => {
+            apply_color_theme(app, true, false);
         }
         "open_docs" => {
             let _ = app.opener().open_url(
@@ -380,66 +701,50 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                 .open_url("https://ko-fi.com/scrab", Option::<String>::None);
         }
         "import_offset" => {
-            let mut prjct = PROJECT.lock().unwrap();
-            if let Err(err) = prjct.import_offset(app) {
-                error!("{}", err);
-            }
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut prjct = PROJECT.lock().unwrap();
+                if let Err(err) = prjct.import_offset(&app) {
+                    error!("{}", err);
+                }
+            });
         }
         ENRICH_SLANIM => {
-            let mut prjct = PROJECT.lock().unwrap();
-            match prjct.enrich_from_slanim_source(app) {
-                Ok(summary) => {
-                    set_edited(true);
-                    let window = app.get_webview_window(MAIN_WINDOW).unwrap();
-                    window.emit("on_project_update", &prjct.scenes).unwrap();
-                    let kind = if summary.positions_updated > 0 {
-                        MessageDialogKind::Info
-                    } else {
-                        MessageDialogKind::Warning
-                    };
-                    app.dialog()
-                        .message(summary.message())
-                        .title("Enrich from SLAnim source")
-                        .kind(kind)
-                        .buttons(MessageDialogButtons::Ok)
-                        .show(|_| {});
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut prjct = PROJECT.lock().unwrap();
+                match prjct.enrich_from_slanim_source(&app) {
+                    Ok(summary) => {
+                        set_edited(true);
+                        let window = app.get_webview_window(MAIN_WINDOW).unwrap();
+                        emit_project_update(&window, &prjct);
+                        let kind = if summary.positions_updated > 0 {
+                            MessageDialogKind::Info
+                        } else {
+                            MessageDialogKind::Warning
+                        };
+                        app.dialog()
+                            .message(summary.message())
+                            .title("Enrich from SLAnim source")
+                            .kind(kind)
+                            .buttons(MessageDialogButtons::Ok)
+                            .show(|_| {});
+                    }
+                    Err(err) => {
+                        error!("{}", err);
+                        app.dialog()
+                            .message(&err)
+                            .title("Enrich failed")
+                            .kind(MessageDialogKind::Error)
+                            .buttons(MessageDialogButtons::Ok)
+                            .show(|_| {});
+                    }
                 }
-                Err(err) => {
-                    error!("{}", err);
-                    app.dialog()
-                        .message(&err)
-                        .title("Enrich failed")
-                        .kind(MessageDialogKind::Error)
-                        .buttons(MessageDialogButtons::Ok)
-                        .show(|_| {});
-                }
-            }
+            });
         }
         _ => {
             error!("Unrecognized command: {}", event.id().0)
         }
-    }
-}
-
-fn window_event_listener(app: &AppHandle, event: &tauri::WindowEvent) {
-    match event {
-        tauri::WindowEvent::CloseRequested { api, .. } => {
-            if get_edited() {
-                let do_close = app
-                    .dialog()
-                    .message("There are unsaved changes. Are you sure you want to close?")
-                    .title("Close")
-                    .buttons(MessageDialogButtons::YesNo)
-                    .kind(MessageDialogKind::Warning)
-                    .blocking_show();
-                if !do_close {
-                    api.prevent_close();
-                    return;
-                }
-            }
-            std::process::exit(0);
-        }
-        _ => {}
     }
 }
 
@@ -448,7 +753,17 @@ fn window_event_listener(app: &AppHandle, event: &tauri::WindowEvent) {
 #[tauri::command]
 async fn request_project_update<R: Runtime>(window: tauri::Window<R>) -> () {
     let prjct = PROJECT.lock().unwrap();
-    window.emit("on_project_update", &prjct.scenes).unwrap();
+    emit_project_update(&window, &prjct);
+}
+
+#[tauri::command]
+fn set_pack_name(name: String) {
+    PROJECT.lock().unwrap().pack_name = name;
+}
+
+#[tauri::command]
+fn set_pack_author(author: String) {
+    PROJECT.lock().unwrap().pack_author = author;
 }
 
 #[tauri::command]
@@ -511,6 +826,29 @@ struct EditorPayload {
     pub scene: NanoID,
     pub stage: Stage,
     pub positions: Vec<PositionInfo>,
+    pub dark: bool,
+}
+
+fn any_stage_editor_open<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.webview_windows()
+        .keys()
+        .any(|label| label.starts_with("stage_editor_"))
+}
+
+fn set_main_window_blocked<R: Runtime>(app: &AppHandle<R>, blocked: bool) {
+    let Some(main) = app.get_webview_window(MAIN_WINDOW) else {
+        return;
+    };
+    let _ = main.set_enabled(!blocked);
+    if !blocked {
+        let _ = main.set_focus();
+    }
+}
+
+fn unblock_main_if_no_stage_editors<R: Runtime>(app: &AppHandle<R>) {
+    if !any_stage_editor_open(app) {
+        set_main_window_blocked(app, false);
+    }
 }
 
 fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: EditorPayload) {
@@ -520,12 +858,20 @@ fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: Editor
         "Opening Stage {} from Scene {}",
         stage.id.0, payload.scene.0
     );
-    // Reopening the same stage must focus the existing window (labels are unique)
+    // Reopening the same stage: focus and re-send payload (recovers empty first open).
     if let Some(existing) = app.get_webview_window(&label) {
+        set_main_window_blocked(app, true);
         let _ = existing.set_focus();
+        if let Err(e) = existing.emit("on_data_received", payload.clone()) {
+            error!("Failed to re-send stage editor payload: {}", e);
+        }
         return;
     }
-    let window = match WebviewWindowBuilder::new(
+    let Some(main) = app.get_webview_window(MAIN_WINDOW) else {
+        error!("Cannot open stage editor: main window missing");
+        return;
+    };
+    let builder = WebviewWindowBuilder::new(
         app,
         label,
         tauri::WebviewUrl::App("./stage.html".into()),
@@ -540,9 +886,15 @@ fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: Editor
     ))
     .min_inner_size(720.0, 540.0)
     .inner_size(1152.0, 864.0)
-    .resizable(true)
-    .build()
-    {
+    .resizable(true);
+    let builder = match builder.parent(&main) {
+        Ok(b) => b,
+        Err(e) => {
+            error!("Failed to parent stage editor to main window: {}", e);
+            return;
+        }
+    };
+    let window = match builder.build() {
         Ok(w) => w,
         Err(e) => {
             error!(
@@ -552,11 +904,16 @@ fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: Editor
             return;
         }
     };
+    set_main_window_blocked(app, true);
+    // Register before geometry restore: webview can emit before restore finishes.
+    let theme_window = window.clone();
     window.clone().once("on_request_data", move |_| {
         if let Err(e) = window.emit("on_data_received", payload.clone()) {
             error!("Failed to send stage editor payload: {}", e);
         }
     });
+    window_geometry::restore_window_geometry(&theme_window);
+    sync_theme_from_window(&theme_window);
 }
 
 #[tauri::command]
@@ -571,6 +928,7 @@ async fn open_stage_editor<R: Runtime>(
             scene: active_scene.id.clone(),
             stage: stage.unwrap_or(Stage::new(&active_scene)),
             positions: active_scene.positions.clone(),
+            dark: get_darkmode(),
         },
     );
 }
@@ -593,6 +951,7 @@ async fn open_stage_editor_from<R: Runtime>(
             scene: active_scene.id.clone(),
             stage,
             positions: active_scene.positions.clone(),
+            dark: get_darkmode(),
         },
     );
 }
@@ -615,6 +974,7 @@ async fn stage_save_and_close<R: Runtime>(
             scene,
             stage,
             positions,
+            dark: get_darkmode(),
         },
     )
     .unwrap();

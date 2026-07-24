@@ -1,4 +1,5 @@
 use log::info;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -79,7 +80,7 @@ pub struct Package {
     pub pack_name: String,
     pub pack_author: String,
     pub prefix_hash: NanoID,
-    pub scenes: HashMap<NanoID, Scene>,
+    pub scenes: IndexMap<NanoID, Scene>,
 }
 
 impl Package {
@@ -88,9 +89,9 @@ impl Package {
             version: VERSION, // current version
             pack_path: Default::default(),
             pack_name: Default::default(),
-            pack_author: "Unknown".into(),
+            pack_author: Default::default(),
             prefix_hash: NanoID::new_prefix(),
-            scenes: HashMap::new(),
+            scenes: IndexMap::new(),
         }
     }
 
@@ -129,7 +130,7 @@ impl Package {
     }
 
     pub fn discard_scene(&mut self, id: &NanoID) -> Option<Scene> {
-        self.scenes.remove(id).map(|s| {
+        self.scenes.shift_remove(id).map(|s| {
             info!("Deleting Scene: {} / {}", id.0, s.name);
             s
         })
@@ -163,7 +164,6 @@ impl Package {
             .into_path()
             .map_err(|e| e.to_string())?;
         *self = Package::from_file(fs::File::open(&path).map_err(|e| e.to_string())?)?;
-        self.set_project_name_from_path(&path);
         self.pack_path = path.into();
         Ok(())
     }
@@ -183,7 +183,6 @@ impl Package {
             self.pack_path.clone()
         };
 
-        self.set_project_name_from_path(&path);
         self.write(path)
     }
 
@@ -191,6 +190,7 @@ impl Package {
         let file = fs::File::create(&path).map_err(|e| e.to_string())?;
         serde_json::to_writer_pretty(BufWriter::new(file), self)
             .map_err(|e| e.to_string())?;
+        self.pack_path = path;
         println!("Saved project {}", self.pack_name);
         Ok(())
     }
@@ -271,10 +271,7 @@ impl Package {
 
         let mut prjct = Package::new();
         prjct.version = 0; // SLAL files are always version 0
-        prjct.pack_name = slal["name"]
-            .as_str()
-            .ok_or("Missing name attribute")?
-            .into();
+        // pack_name / pack_author stay empty for the user to fill in.
 
         let anims = slal["animations"]
             .as_array()
@@ -457,10 +454,6 @@ impl Package {
                 }
             }
             scene.tags = tags;
-            let last = scene.stages.last_mut().unwrap();
-            for position in &mut last.positions {
-                position.extra.climax = true;
-            }
             // build graph
             scene.root = scene.stages[0].id.clone();
             let mut prev_id: Option<NanoID> = None;
@@ -471,6 +464,14 @@ impl Package {
                 }
                 scene.graph.insert(stage.id.clone(), value);
                 prev_id = Some(stage.id.clone());
+            }
+            // Mark climax after graph build (and keep top-level field for IPC;
+            // extra.climax is skip_serializing).
+            if let Some(last) = scene.stages.last_mut() {
+                for position in &mut last.positions {
+                    position.climax = true;
+                    position.extra.climax = true;
+                }
             }
             // add to prjct
             prjct.scenes.insert(scene.id.clone(), scene);
@@ -667,18 +668,6 @@ impl Package {
         }
 
         Ok(())
-    }
-
-    fn set_project_name_from_path(&mut self, path: &PathBuf) -> () {
-        self.pack_name = String::from(
-            path.file_name() // ...\\{project.slsb.json}
-                .and_then(|name| name.to_str())
-                .and_then(|str| {
-                    let ret = &str[0..str.find(".slsb.json").unwrap_or(str.len())];
-                    Some(ret)
-                })
-                .unwrap_or_default(),
-        );
     }
 
     fn write_binary_file(&self, root_dir: &PathBuf) -> Result<(), std::io::Error> {

@@ -6,7 +6,13 @@ function RaceSelect({ race, onSelect, ...raceSelectProps }) {
   const [raceKeys, setRaceKeys] = useState([]);
 
   useEffect(() => {
-    invoke('get_race_keys').then(result => setRaceKeys(result));
+    invoke('get_race_keys')
+      .then((result) => {
+        setRaceKeys(Array.isArray(result) ? result : []);
+      })
+      .catch(() => {
+        setRaceKeys([]);
+      });
   }, []);
 
   return (
@@ -24,8 +30,8 @@ function RaceSelect({ race, onSelect, ...raceSelectProps }) {
           .toLowerCase()
           .localeCompare((optionB?.label ?? '').toLowerCase())
       }
-      options={raceKeys.map((race, i) => {
-        return { value: race, label: race };
+      options={raceKeys.map((key) => {
+        return { value: key, label: key };
       })}
       onSelect={(value) => {
         onSelect(value);

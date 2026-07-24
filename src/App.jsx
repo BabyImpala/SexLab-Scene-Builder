@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
 import { Graph, Shape } from '@antv/x6'
 import { History } from "@antv/x6-plugin-history";
-import { Menu, Layout, Card, Input, Space, Button, Empty, Modal, Tooltip, notification, Divider, Switch, Checkbox, Row, Col, InputNumber, Select, ConfigProvider, theme } from 'antd'
+import { Menu, Layout, Card, Input, Space, Button, Empty, Modal, Tooltip, notification, Divider, Switch, Checkbox, Row, Col, InputNumber, Select, ConfigProvider } from 'antd'
 import {
   ExperimentOutlined, FolderOutlined, PlusOutlined, ExclamationCircleOutlined, QuestionCircleOutlined, DiffOutlined, ZoomInOutlined, ZoomOutOutlined,
   DeleteOutlined, DoubleLeftOutlined, DoubleRightOutlined, PicCenterOutlined, CompressOutlined, PushpinOutlined, DragOutlined, WarningOutlined,
@@ -17,9 +17,12 @@ const { confirm } = Modal;
 import { STAGE_EDGE, STAGE_EDGE_SHAPEID } from "./scene/SceneEdge"
 import { Furnitures } from "./common/Furniture";
 import "./scene/SceneNode"
+import { NODE_WIDTH, NODE_HEIGHT } from "./scene/SceneNode"
 import "./App.css";
 // import "./Dark.css";
 import ScenePosition from "./scene/ScenePosition";
+import { getAppTheme } from "./common/theme";
+import { applyRootDarkClass, readOsDarkMode, writeStoredDarkMode } from "./common/darkMode";
 function makeMenuItem(label, key, icon, children, disabled, danger) {
   return { key, icon, children, label, disabled, danger };
 }
@@ -29,20 +32,63 @@ import { remove } from "@tauri-apps/plugin-fs";
 
 const ZOOM_OPTIONS = { minScale: 0.25, maxScale: 5 };
 
+function buildStageEdgeConfig(sourceNode, targetNode) {
+  const sp = sourceNode.getPosition();
+  const tp = targetNode.getPosition();
+  const isWrap = tp.y > sp.y + 20 && tp.x + NODE_WIDTH < sp.x;
+  const edge = {
+    shape: STAGE_EDGE_SHAPEID,
+    source: { cell: sourceNode.id, port: 'out' },
+    target: { cell: targetNode.id, port: 'in' },
+  };
+  if (isWrap) {
+    const corridorY = sp.y + NODE_HEIGHT + (tp.y - sp.y - NODE_HEIGHT) / 2;
+    edge.router = { name: 'normal' };
+    edge.vertices = [
+      { x: sp.x + NODE_WIDTH + 24, y: sp.y + NODE_HEIGHT / 2 },
+      { x: sp.x + NODE_WIDTH + 24, y: corridorY },
+      { x: tp.x - 24, y: corridorY },
+    ];
+  }
+  return { edge, isWrap };
+}
+
+function graphGridArgs(dark) {
+  return [
+    {
+      thickness: 1,
+      color: dark ? 'rgba(255,255,255,0.14)' : '#e8e8e8',
+    },
+    {
+      color: dark ? 'rgba(255,255,255,0.2)' : 'rgba(33, 35, 48, 0.1)',
+      thickness: 1,
+      factor: 8,
+    },
+  ];
+}
+
 function App() {
-  const [isDark, setIsDark] = useState(false);
+  const [isDark, setIsDark] = useState(readOsDarkMode);
   const [collapsed, setCollapsed] = useState(false);  // Sider collapsed?
   const [api, contextHolder] = notification.useNotification();
   const graphcontainer_ref = useRef(null);
   const [graph, setGraph] = useState(null);
   const [scenes, updateScenes] = useImmer([]);
   const [activeScene, updateActiveScene] = useImmer(null);
-  const [edited, setEdited] = useState(0);
+  const [packName, setPackName] = useState('');
+  const [packAuthor, setPackAuthor] = useState('');
+  const [edited, setEditedState] = useState(false);
+  const editedRef = useRef(false);
+  const setEdited = (v) => {
+    const next = !!v;
+    editedRef.current = next;
+    setEditedState(next);
+  };
   const [cloneToOpen, setCloneToOpen] = useState(false);
   const [cloneToStage, setCloneToStage] = useState(null);
   const [cloneToSourceScene, setCloneToSourceScene] = useState(null);
   const [cloneToTargetId, setCloneToTargetId] = useState(null);
-  const inEdit = useRef(0);
+  const inEdit = useRef(false);
   const [showAreas, setShowAreas] = useState(false);
   const activeSceneRef = useRef(null);
 
@@ -50,31 +96,24 @@ function App() {
     activeSceneRef.current = activeScene;
   }, [activeScene]);
 
-  // Hide Areas when sidebar is collapsed
-  useEffect(() => {
-    let unlisten;
-    listen('on_project_update', () => setShowAreas(false)).then((fn) => {
-      unlisten = fn;
-    });
-    return () => {
-      if (unlisten) unlisten();
-    };
-  }, []);
-
   function generatePositionId() {
     return `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   }
 
-  // Dark Mode Toggle 
   useEffect(() => {
-    // Listen for the toggle_darkmode event from Tauri
     const unlisten = listen('toggle_darkmode', (event) => {
-      setIsDark(event.payload); // event.payload should be true or false
+      setIsDark(event.payload);
     });
+    invoke('get_in_darkmode').then(setIsDark).catch(() => {});
     return () => {
       unlisten.then(f => f());
     };
   }, []);
+
+  useEffect(() => {
+    writeStoredDarkMode(isDark);
+    applyRootDarkClass(isDark);
+  }, [isDark]);
 
   // Graph
   useEffect(() => {
@@ -82,19 +121,9 @@ function App() {
       container: graphcontainer_ref.current,
       grid: {
         visible: true,
-        size: 10,
+        size: 20,
         type: 'doubleMesh',
-        args: [
-          {
-            thickness: 1,
-            color: isDark ? '#444' : '#eee'
-          },
-          {
-            color: 'rgba(33, 35, 48, 0.1)',
-            thickness: 3,
-            factor: 5
-          }
-        ]
+        args: graphGridArgs(isDark),
       },
       panning: true,
       autoResize: true,
@@ -109,22 +138,14 @@ function App() {
         allowMulti: false,
         allowLoop: false,
         allowEdge: false,
-        allowPort: false,
+        allowPort: true,
         allowNode: true,
         createEdge() {
-          return new Shape.Edge(STAGE_EDGE);
+          return new Shape.Edge({
+            shape: STAGE_EDGE_SHAPEID,
+            ...STAGE_EDGE,
+          });
         },
-        // validateEdge({ edge, type, previous }) {
-        //   const source = this.getCellById(edge.source.cell);
-        //   if (source.prop('fixedLen')) {
-        //     const edges = this.getOutgoingEdges(source);
-        //     edges.forEach(it => {
-        //       if (it.id !== edge.id)
-        //         it.remove();
-        //     });
-        //   }
-        //   return true;
-        // }
       }
     })
       .zoomTo(1.0)
@@ -156,6 +177,7 @@ function App() {
           }
           it.update();
         });
+        if (inEdit.current) return;
         setEdited(true);
       })
       // Edge Events
@@ -165,6 +187,7 @@ function App() {
         setEdited(true);
       })
       .on("edge:connected", (e) => {
+        if (inEdit.current) return;
         setEdited(true);
       })
       // Custom Events
@@ -213,6 +236,14 @@ function App() {
       }
     }
   }, []);
+
+  useEffect(() => {
+    if (!graph) return;
+    graph.drawGrid({
+      type: 'doubleMesh',
+      args: graphGridArgs(isDark),
+    });
+  }, [graph, isDark]);
 
   useEffect(() => {
     if (!graph) return;
@@ -424,7 +455,8 @@ function App() {
   useEffect(() => {
     if (!graph) return;
     const unlisten = listen('on_project_update', (event) => {
-      const stage_map = event.payload;
+      const payload = event.payload || {};
+      const stage_map = payload.scenes ?? payload;
       const scns = [];
       for (const key in stage_map) {
         if (Object.hasOwnProperty.call(stage_map, key)) {
@@ -434,11 +466,17 @@ function App() {
       }
       console.log("Opening new Project with Scenes: ", scns);
       updateScenes(scns);
+      setPackName(payload.pack_name ?? '');
+      setPackAuthor(payload.pack_author ?? '');
       setEdited(false);
       if (scns.length) {
+        // Show side panels before loading the scene so graph fit uses the
+        // final layout width (same as Edit from the sidebar).
+        setShowAreas(true);
         setActiveScene(scns[0]);
       } else {
         updateActiveScene(null);
+        setShowAreas(false);
       }
     });
     invoke('request_project_update');
@@ -463,7 +501,7 @@ function App() {
   }
 
   const setActiveScene = async (newscene) => {
-    if (!inEdit.current && edited > 0) {
+    if (!inEdit.current && editedRef.current) {
       confirm({
         title: 'Unsaved changes',
         icon: <ExclamationCircleOutlined />,
@@ -480,78 +518,91 @@ function App() {
     inEdit.current = true;
     graph.clearCells();
     updateActiveScene(newscene);
-    for (const [key, { x, y }] of Object.entries(newscene.graph || {})) {
+
+    const sceneGraph = newscene.graph || {};
+    const graphIds = Object.keys(sceneGraph);
+    // Place stacked SLAL/default graphs at layered coords before mount so
+    // X6 react HTML + edges never lock to a shared (40,40) origin.
+    const stacked = graphCoordsStacked(sceneGraph);
+    const layoutPositions = stacked
+      ? computeLayeredPositions(sceneGraph, newscene.root, graphIds)
+      : null;
+
+    for (const [key, { x, y }] of Object.entries(sceneGraph)) {
       const stage = newscene.stages.find((s) => s.id === key);
       if (!stage) {
         console.warn('Graph references missing stage', key, newscene);
         continue;
       }
-      const node = addStageToGraph(stage, x, y);
+      const pos = layoutPositions?.get(key) || { x, y };
+      const node = addStageToGraph(stage, pos.x, pos.y);
       updateNodeProps(stage, node, newscene);
     }
     const nodes = graph.getNodes();
-    for (const [sourceid, { dest }] of Object.entries(newscene.graph)) {
+    for (const [sourceid, { dest }] of Object.entries(sceneGraph)) {
       if (!dest.length) continue;
       const sourceNode = nodes.find(node => node.id === sourceid);
       if (!sourceNode) continue;
-      const sourcePort = sourceNode.ports.items[0];
       dest.forEach(targetid => {
         const target = nodes.find(node => node.id === targetid);
         if (!target) return;
-        graph.addEdge({
-          shape: STAGE_EDGE_SHAPEID,
-          source: {
-            cell: sourceNode,
-            port: sourcePort.id
-          },
-          target,
-        });
+        const { edge } = buildStageEdgeConfig(sourceNode, target);
+        graph.addEdge(edge);
       });
     }
-    // Converted / default graphs often stack every stage at (40, 40)
-    if (nodesAreStacked(nodes)) {
-      arrangeStages(newscene.root, false);
-    } else {
-      graph.centerContent();
-    }
-    inEdit.current = false;
     setEdited(false);
+    // Wait until the graph container is laid out. On first project/SLAL load the
+    // scene box was display:none and/or the tags panel is still mounting, so an
+    // immediate zoomToFit leaves nodes uncentered; Edit later works because the
+    // container already has a size.
+    const fitWhenReady = (retries = 30) => {
+      requestAnimationFrame(() => {
+        try {
+          graph.resize();
+        } catch (_) { /* container may be mid-layout */ }
+        const el = graph.container;
+        const ready = el && el.clientWidth > 0 && el.clientHeight > 0;
+        if (!ready && retries > 0) {
+          fitWhenReady(retries - 1);
+          return;
+        }
+        if (nodes.length) {
+          graph.zoomToFit({ padding: 32, maxScale: 1, minScale: 0.45 });
+          graph.centerContent();
+          graph.getEdges().forEach((edge) => {
+            const edgeView = graph.findViewByCell(edge);
+            if (edgeView) edgeView.update();
+          });
+        }
+        inEdit.current = false;
+        setEdited(false);
+      });
+    };
+    fitWhenReady();
   }
 
-  const gridSize = 200;
-  const LAYOUT_H_GAP = 220;
-  const LAYOUT_V_GAP = 140;
+  const gridSize = 260;
+  const LAYOUT_H_GAP = 280;
+  const LAYOUT_V_GAP = 150;
+  const MAX_STAGES_PER_ROW = 5;
 
-  const nodesAreStacked = (nodes) => {
-    if (nodes.length < 2) return false;
-    const positions = nodes.map((n) => n.getPosition());
+  const graphCoordsStacked = (sceneGraph) => {
+    const positions = Object.values(sceneGraph || {}).map(({ x, y }) => ({ x, y }));
+    if (positions.length < 2) return false;
     const first = positions[0];
     return positions.every((p) => p.x === first.x && p.y === first.y);
   };
 
-  // Layered layout from the root following edge connections (left → right by depth)
-  const arrangeStages = (rootId = activeScene?.root, markEdited = true) => {
-    if (!graph) return;
-    const nodes = graph.getNodes();
-    if (!nodes.length) return;
-
-    const start =
-      nodes.find((n) => n.id === rootId) ||
-      nodes.find((n) => n.prop('isStart')) ||
-      nodes[0];
-
+  const computeLayeredPositions = (sceneGraph, rootId, nodeIds) => {
     const outgoing = new Map();
-    nodes.forEach((n) => {
-      const edges = graph.getOutgoingEdges(n) || [];
-      outgoing.set(
-        n.id,
-        edges.map((e) => e.getTargetCellId()).filter(Boolean)
-      );
+    nodeIds.forEach((id) => {
+      const dest = (sceneGraph[id]?.dest || []).filter((d) => nodeIds.includes(d));
+      outgoing.set(id, dest);
     });
-
+    const start = nodeIds.includes(rootId) ? rootId : nodeIds[0];
     const level = new Map();
-    const queue = [start.id];
-    level.set(start.id, 0);
+    const queue = start ? [start] : [];
+    if (start) level.set(start, 0);
     while (queue.length) {
       const id = queue.shift();
       for (const dest of outgoing.get(id) || []) {
@@ -561,39 +612,106 @@ function App() {
         }
       }
     }
-
-    const orphans = nodes.filter((n) => !level.has(n.id)).map((n) => n.id);
+    const orphans = nodeIds.filter((id) => !level.has(id));
     const byLevel = new Map();
     for (const [id, lv] of level) {
       if (!byLevel.has(lv)) byLevel.set(lv, []);
       byLevel.get(lv).push(id);
     }
 
-    for (const [lv, ids] of [...byLevel.entries()].sort((a, b) => a[0] - b[0])) {
-      ids.forEach((id, i) => {
-        const node = graph.getCellById(id);
-        if (node) {
-          node.setPosition(40 + lv * LAYOUT_H_GAP, 40 + i * LAYOUT_V_GAP);
-        }
-      });
+    const ordered = [];
+    for (const [, ids] of [...byLevel.entries()].sort((a, b) => a[0] - b[0])) {
+      ordered.push(...ids);
     }
+    ordered.push(...orphans);
 
-    // Unreachable nodes share one row under the main graph (avoid stretching width)
-    if (orphans.length) {
-      const maxRows = Math.max(
-        1,
-        ...[...byLevel.values()].map((ids) => ids.length),
-        0
-      );
-      const orphanY = 40 + maxRows * LAYOUT_V_GAP;
-      orphans.forEach((id, i) => {
-        const node = graph.getCellById(id);
-        if (node) {
-          node.setPosition(40 + i * LAYOUT_H_GAP, orphanY);
-        }
+    const linear =
+      orphans.length === 0 &&
+      [...byLevel.values()].every((ids) => ids.length <= 1);
+
+    const positions = new Map();
+    if (linear && ordered.length > MAX_STAGES_PER_ROW) {
+      // Cap row width so zoomToFit does not shrink node text too far.
+      ordered.forEach((id, i) => {
+        const row = Math.floor(i / MAX_STAGES_PER_ROW);
+        const col = i % MAX_STAGES_PER_ROW;
+        positions.set(id, {
+          x: 40 + col * LAYOUT_H_GAP,
+          y: 40 + row * LAYOUT_V_GAP,
+        });
       });
+    } else {
+      for (const [lv, ids] of [...byLevel.entries()].sort((a, b) => a[0] - b[0])) {
+        ids.forEach((id, i) => {
+          positions.set(id, {
+            x: 40 + lv * LAYOUT_H_GAP,
+            y: 40 + i * LAYOUT_V_GAP,
+          });
+        });
+      }
+      if (orphans.length) {
+        const maxRows = Math.max(
+          1,
+          ...[...byLevel.values()].map((ids) => ids.length),
+          0
+        );
+        const orphanY = 40 + maxRows * LAYOUT_V_GAP;
+        orphans.forEach((id, i) => {
+          const row = Math.floor(i / MAX_STAGES_PER_ROW);
+          const col = i % MAX_STAGES_PER_ROW;
+          positions.set(id, {
+            x: 40 + col * LAYOUT_H_GAP,
+            y: orphanY + row * LAYOUT_V_GAP,
+          });
+        });
+      }
     }
+    return positions;
+  };
 
+  const arrangeStages = (rootId = activeScene?.root, markEdited = true) => {
+    if (!graph) return;
+    const nodes = graph.getNodes();
+    if (!nodes.length) return;
+
+    const sceneGraph = {};
+    nodes.forEach((n) => {
+      const edges = graph.getOutgoingEdges(n) || [];
+      sceneGraph[n.id] = {
+        dest: edges.map((e) => e.getTargetCellId()).filter(Boolean),
+        x: n.getPosition().x,
+        y: n.getPosition().y,
+      };
+    });
+    const start =
+      nodes.find((n) => n.id === rootId) ||
+      nodes.find((n) => n.prop('isStart')) ||
+      nodes[0];
+    const positions = computeLayeredPositions(
+      sceneGraph,
+      start.id,
+      nodes.map((n) => n.id)
+    );
+    for (const [id, pos] of positions) {
+      const node = graph.getCellById(id);
+      if (node) node.setPosition(pos.x, pos.y);
+    }
+    graph.getEdges().forEach((edge) => {
+      const source = edge.getSourceNode();
+      const target = edge.getTargetNode();
+      if (source && target) {
+        const { edge: cfg } = buildStageEdgeConfig(source, target);
+        if (cfg.vertices) {
+          edge.setRouter(cfg.router);
+          edge.setVertices(cfg.vertices);
+        } else {
+          edge.setRouter(STAGE_EDGE.router);
+          edge.setVertices([]);
+        }
+      }
+      const edgeView = graph.findViewByCell(edge);
+      if (edgeView) edgeView.update();
+    });
     graph.zoomToFit({ padding: 24, maxScale: 1 });
     graph.centerContent();
     if (markEdited) setEdited(true);
@@ -632,10 +750,15 @@ function App() {
   };
 
   const updateNodeProps = (stage, node, belongingScene) => {
+    const isOrgasm = !!(
+      stage.positions &&
+      stage.positions.some((p) => p.climax || p.extra?.climax)
+    );
     node.prop('stage', stage);
     node.prop('scene', belongingScene);
     node.prop('fixedLen', stage.extra.fixed_len);
     node.prop('isStart', belongingScene && belongingScene.root === stage.id);
+    node.prop('isOrgasm', isOrgasm);
   }
 
   const saveScene = () => {
@@ -882,21 +1005,13 @@ function App() {
   };
 
   return (
-    <ConfigProvider
-      theme={{
-        algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
-        token: isDark
-          ? {
-              //Dark Mode Color Overrides
-              colorBgBase: '#001529',
-            }
-          : {
-              // Light Mode Color Overrides
-            },
-      }}
-    >
+    <ConfigProvider theme={getAppTheme(isDark)}>
       <Layout hasSider style={{ height: '100vh' }}>
-        <PanelGroup direction="horizontal" style={{ height: '100%' }}>
+        <PanelGroup
+          direction="horizontal"
+          autoSaveId="slsb-main-horizontal"
+          style={{ height: '100%' }}
+        >
           {/* Left Panel */}
           <Panel minSize={10} defaultSize={15} maxSize={50} id="left-panel">
             {contextHolder}
@@ -954,15 +1069,29 @@ function App() {
                   type="text"
                   placeholder="Package Name"
                   className="sidebar-form"
+                  value={packName}
+                  onChange={(e) => {
+                    const name = e.target.value;
+                    setPackName(name);
+                    invoke('set_pack_name', { name });
+                    setEdited(true);
+                  }}
                 />
                 <input
                   type="text"
                   placeholder="Author Name"
                   className="sidebar-form"
+                  value={packAuthor}
+                  onChange={(e) => {
+                    const author = e.target.value;
+                    setPackAuthor(author);
+                    invoke('set_pack_author', { author });
+                    setEdited(true);
+                  }}
                 />
                 <Divider id="sidebar-divider" />
                 <Menu
-                  theme={'dark'}
+                  theme={isDark ? 'dark' : 'light'}
                   mode="inline"
                   selectable={false}
                   items={sideBarMenu}
@@ -976,9 +1105,12 @@ function App() {
           <PanelResizeHandle className="resize-handle" />
 
           <Panel>
-            <PanelGroup direction="vertical">
+            <PanelGroup direction="vertical" autoSaveId="slsb-main-vertical">
               <Panel defaultSize={50} style={{}}>
-                <PanelGroup direction="horizontal">
+                <PanelGroup
+                  direction="horizontal"
+                  autoSaveId="slsb-graph-tags-horizontal"
+                >
                   {/* Graph Area */}
                   <Panel id="graph-panel">
                     <Layout style={{ height: '100%' }}>
@@ -999,7 +1131,7 @@ function App() {
                                 <Space.Compact style={{ width: '98%' }}>
                                   <div
                                     style={
-                                      edited < 1 ? { display: 'none' } : {}
+                                      !edited ? { display: 'none' } : {}
                                     }
                                   >
                                     <Tooltip title={'Unsaved changes'}>
@@ -1204,14 +1336,40 @@ function App() {
                         bordered={false}
                         title={'Scene Tags'}
                         extra={
-                          <Tooltip
-                            className="tool-tip"
-                            title={
-                              'Tags which are shared between all stages in the scene.'
-                            }
-                          >
-                            <Button type="link">Info</Button>
-                          </Tooltip>
+                          <Space size={0}>
+                            <Tooltip
+                              title="Copy scene tags onto every stage (replaces each stage's tags)."
+                            >
+                              <Button
+                                type="text"
+                                disabled={
+                                  !activeScene ||
+                                  !activeScene.stages ||
+                                  activeScene.stages.length === 0
+                                }
+                                onClick={() => {
+                                  if (!activeScene?.stages?.length) return;
+                                  const copied = [...(activeScene.tags || [])];
+                                  updateActiveScene((prev) => {
+                                    for (const stage of prev.stages) {
+                                      stage.tags = [...copied];
+                                    }
+                                  });
+                                  setEdited(true);
+                                }}
+                              >
+                                Copy to stages
+                              </Button>
+                            </Tooltip>
+                            <Tooltip
+                              className="tool-tip"
+                              title={
+                                'Tags which are shared between all stages in the scene.'
+                              }
+                            >
+                              <Button type="text">Info</Button>
+                            </Tooltip>
+                          </Space>
                         }
                       >
                         <TagTree
@@ -1235,7 +1393,7 @@ function App() {
                             className="tool-tip"
                             title={'Furniture settings for the scene.'}
                           >
-                            <Button type="link">Info</Button>
+                            <Button type="text">Info</Button>
                           </Tooltip>
                         }
                       >
@@ -1436,7 +1594,7 @@ function App() {
                           'Position Date shared between all stages in the scene.'
                         }
                       >
-                        <Button type="link">Info</Button>
+                        <Button type="text">Info</Button>
                       </Tooltip>
                     }
                   >
@@ -1472,7 +1630,7 @@ function App() {
                             span={24}
                             style={{ padding: 12, textAlign: 'center' }}
                           >
-                            <div style={{ color: 'rgba(0,0,0,0.45)' }}>
+                            <div className="scene-positions-empty">
                               No positions yet — use "Add Stage" or add a
                               position from the stage editor.
                             </div>

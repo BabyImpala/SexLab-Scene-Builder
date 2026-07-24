@@ -1,53 +1,30 @@
-import { useState, useEffect, useRef } from "react";
 import { Card, Space, InputNumber, Tooltip } from "antd";
-import { useImmer } from "use-immer";
+import { produce } from "immer";
 import CheckboxEx from "../components/CheckboxEx";
 import RaceSelect from "../components/RaceSelect";
 
 function ScenePosition({ position, onChange }) {
-  const [sex, updateSex] = useImmer(position.sex);
-  const [race, setRace] = useState(position.race);
-  const [scale, setScale] = useState(
-    typeof position.scale === "number" ? position.scale : 1.0
-  );
-  const [extra, updateExtra] = useImmer({
+  const sex = position.sex || {};
+  const race = position.race;
+  const scale = typeof position.scale === "number" ? position.scale : 1.0;
+  const extra = {
     submissive: position.submissive,
     vampire: position.vampire,
     dead: position.dead,
-  });
-  // Ignore the emit that follows prop→local sync (including first mount).
-  const suppressEmit = useRef(true);
+  };
 
-  // Keep local state in sync when the parent swaps/reloads this slot
-  useEffect(() => {
-    suppressEmit.current = true;
-    updateSex(position.sex);
-    setRace(position.race);
-    setScale(typeof position.scale === "number" ? position.scale : 1.0);
-    updateExtra({
-      submissive: position.submissive,
-      vampire: position.vampire,
-      dead: position.dead,
-    });
-  }, [position.id, position.race, position.scale, position.sex, position.submissive, position.vampire, position.dead]);
-
-  useEffect(() => {
-    if (suppressEmit.current) {
-      suppressEmit.current = false;
-      return;
-    }
+  const push = (patch) => {
     onChange({
       ...position,
       sex,
       race,
-      scale: typeof scale === "number" ? scale : 1.0,
+      scale,
       submissive: extra.submissive,
       vampire: extra.vampire,
       dead: extra.dead,
+      ...patch,
     });
-    // Intentionally omit onChange/position to avoid feedback loops
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sex, race, scale, extra]);
+  };
 
   return (
     <Card size="small" className="scene-position-card">
@@ -57,22 +34,36 @@ function ScenePosition({ position, onChange }) {
             race={race}
             onSelect={(e) => {
               if (e !== "Human") {
-                updateSex((prev) => {
-                  prev.futa = false;
+                push({
+                  race: e,
+                  sex: produce(sex, (draft) => {
+                    draft.futa = false;
+                  }),
                 });
+              } else {
+                push({ race: e });
               }
-              setRace(e);
             }}
           />
           <Space.Compact>
-            <CheckboxEx obj={sex} label={"Male"} attr={"male"} updateFunc={updateSex} />
-            <CheckboxEx obj={sex} label={"Female"} attr={"female"} updateFunc={updateSex} />
+            <CheckboxEx
+              obj={sex}
+              label={"Male"}
+              attr={"male"}
+              updateFunc={(recipe) => push({ sex: produce(sex, recipe) })}
+            />
+            <CheckboxEx
+              obj={sex}
+              label={"Female"}
+              attr={"female"}
+              updateFunc={(recipe) => push({ sex: produce(sex, recipe) })}
+            />
             <CheckboxEx
               obj={sex}
               label={"Futa"}
               disabled={race !== "Human"}
               attr={"futa"}
-              updateFunc={updateSex}
+              updateFunc={(recipe) => push({ sex: produce(sex, recipe) })}
             />
           </Space.Compact>
         </div>
@@ -87,7 +78,14 @@ function ScenePosition({ position, onChange }) {
                   obj={extra}
                   label={"Submissive"}
                   attr={"submissive"}
-                  updateFunc={updateExtra}
+                  updateFunc={(recipe) => {
+                    const next = produce(extra, recipe);
+                    push({
+                      submissive: next.submissive,
+                      vampire: next.vampire,
+                      dead: next.dead,
+                    });
+                  }}
                 />
               </div>
             </Tooltip>
@@ -98,7 +96,14 @@ function ScenePosition({ position, onChange }) {
                   label={"Vampire"}
                   attr={"vampire"}
                   disabled={race !== "Human"}
-                  updateFunc={updateExtra}
+                  updateFunc={(recipe) => {
+                    const next = produce(extra, recipe);
+                    push({
+                      submissive: next.submissive,
+                      vampire: next.vampire,
+                      dead: next.dead,
+                    });
+                  }}
                 />
               </div>
             </Tooltip>
@@ -108,7 +113,14 @@ function ScenePosition({ position, onChange }) {
                   obj={extra}
                   label={"Unconscious"}
                   attr={"dead"}
-                  updateFunc={updateExtra}
+                  updateFunc={(recipe) => {
+                    const next = produce(extra, recipe);
+                    push({
+                      submissive: next.submissive,
+                      vampire: next.vampire,
+                      dead: next.dead,
+                    });
+                  }}
                 />
               </div>
             </Tooltip>
@@ -130,7 +142,7 @@ function ScenePosition({ position, onChange }) {
             step={0.01}
             value={scale}
             onChange={(e) => {
-              setScale(typeof e === "number" ? e : 1.0);
+              push({ scale: typeof e === "number" ? e : 1.0 });
             }}
             placeholder="1.0"
             style={{ width: 96 }}

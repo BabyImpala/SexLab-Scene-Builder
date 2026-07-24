@@ -28,7 +28,11 @@ impl Stage {
             id: NanoID::new_nanoid(),
             name: Default::default(),
             positions: stage.map_or_else(
-                || vec![Position::new(None); parent_scene.positions.len()],
+                || {
+                    // Empty scene has no actors yet; first stage still needs one slot.
+                    let n = parent_scene.positions.len().max(1);
+                    vec![Position::new(None); n]
+                },
                 |s| s.positions.iter().map(|p| Position::new(Some(p))).collect(),
             ),
             tags: parent_scene.tags.clone(),
