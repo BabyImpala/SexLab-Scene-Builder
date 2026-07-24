@@ -466,6 +466,43 @@ mod smoke_tests {
     }
 
     #[test]
+    fn anpack_user_list_regenerates_byte_identical_behavior() {
+        let research = Path::new(env!("CARGO_MANIFEST_DIR")).join("../research");
+        let list_src = research.join("FNIS_AnPack_List.txt");
+        let ref_hkx = research.join("FNIS_AnPack_Behavior.hkx");
+        if !list_src.is_file() || !ref_hkx.is_file() {
+            eprintln!("skip: research/FNIS_AnPack_* missing");
+            return;
+        }
+
+        let tmp = std::env::temp_dir().join(format!(
+            "slsb_anpack_smoke_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        let pack_dir = tmp
+            .join("meshes")
+            .join("actors")
+            .join("character")
+            .join("animations")
+            .join("AnPack");
+        fs::create_dir_all(&pack_dir).unwrap();
+        let list_path = pack_dir.join("FNIS_AnPack_List.txt");
+        fs::copy(&list_src, &list_path).unwrap();
+
+        let out = generate_behavior_for_list(&list_path).expect("generate AnPack behavior");
+        let gen = fs::read(&out).unwrap();
+        let reference = fs::read(&ref_hkx).unwrap();
+        assert_eq!(
+            gen, reference,
+            "AnPack Behavior must be byte-identical to user/reference output (gen={}B ref={}B)",
+            gen.len(),
+            reference.len()
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     #[ignore = "requires local research/behavior_samples (not in repo)"]
     fn lesbiandd_xml_object_order_matches_reference() {
         let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../research/behavior_samples");

@@ -304,6 +304,7 @@ const NEW_PROJECT: &str = "new_prjct";
 const OPEN_PROJECT: &str = "open_prjct";
 const IMPORT_SLAL: &str = "import_slal";
 const ENRICH_SLANIM: &str = "enrich_slanim";
+const ENRICH_FNIS: &str = "enrich_fnis";
 const THEME_SYSTEM: &str = "theme_system";
 const THEME_LIGHT: &str = "theme_light";
 const THEME_DARK: &str = "theme_dark";
@@ -482,6 +483,13 @@ fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
                 app,
                 ENRICH_SLANIM,
                 "Enrich from SLAnim source...",
+                true,
+                Option::<&str>::None,
+            )?,
+            &MenuItem::with_id(
+                app,
+                ENRICH_FNIS,
+                "Enrich from FNIS AnimList...",
                 true,
                 Option::<&str>::None,
             )?,
@@ -726,6 +734,39 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                         app.dialog()
                             .message(summary.message())
                             .title("Enrich from SLAnim source")
+                            .kind(kind)
+                            .buttons(MessageDialogButtons::Ok)
+                            .show(|_| {});
+                    }
+                    Err(err) => {
+                        error!("{}", err);
+                        app.dialog()
+                            .message(&err)
+                            .title("Enrich failed")
+                            .kind(MessageDialogKind::Error)
+                            .buttons(MessageDialogButtons::Ok)
+                            .show(|_| {});
+                    }
+                }
+            });
+        }
+        ENRICH_FNIS => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut prjct = PROJECT.lock().unwrap();
+                match prjct.enrich_from_fnis_lists(&app) {
+                    Ok(summary) => {
+                        set_edited(true);
+                        let window = app.get_webview_window(MAIN_WINDOW).unwrap();
+                        emit_project_update(&window, &prjct);
+                        let kind = if summary.positions_updated > 0 {
+                            MessageDialogKind::Info
+                        } else {
+                            MessageDialogKind::Warning
+                        };
+                        app.dialog()
+                            .message(summary.message_fnis())
+                            .title("Enrich from FNIS AnimList")
                             .kind(kind)
                             .buttons(MessageDialogButtons::Ok)
                             .show(|_| {});

@@ -19,6 +19,8 @@ pub mod define;
 
 pub mod slanim_source;
 
+pub mod fnis_list;
+
 pub mod behavior_gen;
 
 mod serialize;
