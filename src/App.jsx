@@ -1000,7 +1000,11 @@ function App() {
   return (
     <ConfigProvider theme={getAppTheme(isDark)}>
       <Layout hasSider style={{ height: '100vh' }}>
-        <PanelGroup direction="horizontal" style={{ height: '100%' }}>
+        <PanelGroup
+          direction="horizontal"
+          autoSaveId="slsb-main-horizontal"
+          style={{ height: '100%' }}
+        >
           {/* Left Panel */}
           <Panel minSize={10} defaultSize={15} maxSize={50} id="left-panel">
             {contextHolder}
@@ -1094,9 +1098,12 @@ function App() {
           <PanelResizeHandle className="resize-handle" />
 
           <Panel>
-            <PanelGroup direction="vertical">
+            <PanelGroup direction="vertical" autoSaveId="slsb-main-vertical">
               <Panel defaultSize={50} style={{}}>
-                <PanelGroup direction="horizontal">
+                <PanelGroup
+                  direction="horizontal"
+                  autoSaveId="slsb-graph-tags-horizontal"
+                >
                   {/* Graph Area */}
                   <Panel id="graph-panel">
                     <Layout style={{ height: '100%' }}>
