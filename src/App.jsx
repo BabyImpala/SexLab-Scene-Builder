@@ -53,12 +53,18 @@ function App() {
   const [graph, setGraph] = useState(null);
   const [scenes, updateScenes] = useImmer([]);
   const [activeScene, updateActiveScene] = useImmer(null);
-  const [edited, setEdited] = useState(0);
+  const [edited, setEditedState] = useState(false);
+  const editedRef = useRef(false);
+  const setEdited = (v) => {
+    const next = !!v;
+    editedRef.current = next;
+    setEditedState(next);
+  };
   const [cloneToOpen, setCloneToOpen] = useState(false);
   const [cloneToStage, setCloneToStage] = useState(null);
   const [cloneToSourceScene, setCloneToSourceScene] = useState(null);
   const [cloneToTargetId, setCloneToTargetId] = useState(null);
-  const inEdit = useRef(0);
+  const inEdit = useRef(false);
   const [showAreas, setShowAreas] = useState(false);
   const activeSceneRef = useRef(null);
 
@@ -158,7 +164,6 @@ function App() {
         setEdited(true);
       })
       .on("node:moved", ({ e, x, y, node, view }) => {
-        if (inEdit.current) return;
         const box = node.getBBox();
         const views = newGraph.findViewsInArea(box);
         views.forEach(it => {
@@ -167,6 +172,7 @@ function App() {
           }
           it.update();
         });
+        if (inEdit.current) return;
         setEdited(true);
       })
       // Edge Events
@@ -483,7 +489,7 @@ function App() {
   }
 
   const setActiveScene = async (newscene) => {
-    if (!inEdit.current && edited > 0) {
+    if (!inEdit.current && editedRef.current) {
       confirm({
         title: 'Unsaved changes',
         icon: <ExclamationCircleOutlined />,
@@ -1011,7 +1017,7 @@ function App() {
                                 <Space.Compact style={{ width: '98%' }}>
                                   <div
                                     style={
-                                      edited < 1 ? { display: 'none' } : {}
+                                      !edited ? { display: 'none' } : {}
                                     }
                                   >
                                     <Tooltip title={'Unsaved changes'}>
