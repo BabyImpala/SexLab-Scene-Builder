@@ -68,6 +68,8 @@ bitflags_with_strings! {
 
         XCross = 1 << 25,
         Pillory = 1 << 26,
+        Pole = 1 << 27,
+        Wheel = 1 << 28,
     }
 }
 

@@ -66,6 +66,8 @@ export const Furnitures = [
     options: [
       { label: "XCross", value: "XCross" },
       { label: "Pillory", value: "Pillory" },
+      { label: "Pole", value: "Pole" },
+      { label: "Wheel", value: "Wheel" },
     ],
   },
 ];
