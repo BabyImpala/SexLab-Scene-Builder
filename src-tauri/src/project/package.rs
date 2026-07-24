@@ -1,4 +1,5 @@
 use log::info;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -79,7 +80,7 @@ pub struct Package {
     pub pack_name: String,
     pub pack_author: String,
     pub prefix_hash: NanoID,
-    pub scenes: HashMap<NanoID, Scene>,
+    pub scenes: IndexMap<NanoID, Scene>,
 }
 
 impl Package {
@@ -90,7 +91,7 @@ impl Package {
             pack_name: Default::default(),
             pack_author: "Unknown".into(),
             prefix_hash: NanoID::new_prefix(),
-            scenes: HashMap::new(),
+            scenes: IndexMap::new(),
         }
     }
 
@@ -129,7 +130,7 @@ impl Package {
     }
 
     pub fn discard_scene(&mut self, id: &NanoID) -> Option<Scene> {
-        self.scenes.remove(id).map(|s| {
+        self.scenes.shift_remove(id).map(|s| {
             info!("Deleting Scene: {} / {}", id.0, s.name);
             s
         })

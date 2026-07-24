@@ -31,7 +31,7 @@ const DEFAULT_MAINWINDOW_TITLE: &str = "SexLab Scene Builder";
 
 #[derive(Debug, Serialize, Clone)]
 struct ProjectUpdatePayload<'a> {
-    scenes: &'a std::collections::HashMap<NanoID, Scene>,
+    scenes: &'a indexmap::IndexMap<NanoID, Scene>,
     pack_name: &'a str,
     pack_author: &'a str,
 }

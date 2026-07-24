@@ -3553,6 +3553,7 @@ dependencies = [
  "dirs 5.0.1",
  "fern",
  "gtk",
+ "indexmap 2.14.0",
  "log",
  "nanoid",
  "once_cell",
