@@ -17,6 +17,12 @@ export function loadUserTags() {
   }
 }
 
+function saveUserTags(tags) {
+  const next = [...tags].sort((a, b) => a.localeCompare(b));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  return next;
+}
+
 /** Persist tags that are not in the built-in preset lists. */
 export function rememberUserTags(candidates, presets = []) {
   const presetKeys = new Set(presets.map(tagKey));
@@ -31,7 +37,34 @@ export function rememberUserTags(candidates, presets = []) {
     changed = true;
   }
   if (!changed) return [...byKey.values()];
-  const next = [...byKey.values()].sort((a, b) => a.localeCompare(b));
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  return next;
+  return saveUserTags([...byKey.values()]);
+}
+
+/** Remove a saved custom tag from localStorage. */
+export function removeUserTag(tag) {
+  const key = tagKey(tag);
+  const next = loadUserTags().filter((t) => tagKey(t) !== key);
+  return saveUserTags(next);
+}
+
+/**
+ * Rename a saved custom tag. Returns the updated list, or null if the new
+ * name is empty / collides with a preset or another saved tag.
+ */
+export function renameUserTag(oldTag, newTag, presets = []) {
+  const oldKey = tagKey(oldTag);
+  const trimmed = String(newTag ?? '').trim();
+  if (!trimmed) return null;
+
+  const newKey = tagKey(trimmed);
+  const presetKeys = new Set(presets.map(tagKey));
+  if (presetKeys.has(newKey)) return null;
+
+  const byKey = new Map(loadUserTags().map((t) => [tagKey(t), t]));
+  if (!byKey.has(oldKey)) return null;
+  if (newKey !== oldKey && byKey.has(newKey)) return null;
+
+  byKey.delete(oldKey);
+  byKey.set(newKey, trimmed);
+  return saveUserTags([...byKey.values()]);
 }
