@@ -1,0 +1,99 @@
+name: Bug report
+description: Something in SexLab Scene Builder is broken or unexpected
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please fill out as much as you can — incomplete reports are harder to reproduce.
+
+        Use this form only for **SexLab Scene Builder** (the editor / exporter). Issues with SexLab P+ in-game playback belong in [SexLabpp](https://github.com/Scrabx3/SexLabpp).
+
+  - type: input
+    id: version
+    attributes:
+      label: SLSB version
+      description: App version from About, or the Git tag / commit if building from source.
+      placeholder: e.g. 2.0.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 10
+        - Windows 11
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os-details
+    attributes:
+      label: OS details (optional)
+      description: Distro, build number, Wine/Proton, etc. if relevant.
+      placeholder: e.g. CachyOS, Windows 11 24H2
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Where the problem shows up.
+      options:
+        - UI / editor
+        - Project load / save (.slsb)
+        - Import (SLAL → SLSB)
+        - Export / build (SLSB → pack)
+        - SLAL export
+        - Behavior.hkx generation
+        - CLI
+        - Installer / packaging
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Clear description of the bug.
+      placeholder: When I …, SLSB …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      placeholder: I expected …
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps are ideal. Include a minimal project or pack if you can share one.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / error text
+      description: Paste console output, panic messages, or relevant log lines. Wrap in code fences if long.
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Screenshots, related PRs, workarounds, or anything else that helps.
