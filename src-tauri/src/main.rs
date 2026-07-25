@@ -1056,7 +1056,10 @@ async fn open_stage_editor_from<R: Runtime>(
     // Clone must get a fresh id so save inserts a new stage instead of overwriting the source
     let mut stage = copy_stage;
     stage.id = NanoID::new_nanoid();
-    if !stage.name.is_empty() {
+    if stage.name.is_empty() {
+        let n = active_scene.stages.len() + 1;
+        stage.name = format!("Stage {n}/{n}");
+    } else {
         stage.name = format!("{} (Copy)", stage.name);
     }
     open_stage_editor_impl(

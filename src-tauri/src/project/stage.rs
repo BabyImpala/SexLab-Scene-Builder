@@ -27,9 +27,10 @@ pub struct Extra {
 impl Stage {
     pub fn new(parent_scene: &Scene) -> Self {
         let stage = parent_scene.stages.last();
+        let n = parent_scene.stages.len() + 1;
         Self {
             id: NanoID::new_nanoid(),
-            name: Default::default(),
+            name: format!("Stage {n}/{n}"),
             positions: stage.map_or_else(
                 || {
                     // Empty scene has no actors yet; first stage still needs one slot.
