@@ -93,12 +93,22 @@ export function poseFamily(stageName) {
   return familyFromCleanName(cleanStageName(stageName));
 }
 
-/**
- * True when the stage looks like a short "Go to …" transition node.
- * @param {string} stageName
- */
-export function isTransitionStage(stageName) {
-  return /^Go to\s+/i.test(cleanStageName(stageName));
+/** @param {object|string} stageOrName */
+export function isTransitionStage(stageOrName) {
+  if (stageOrName && typeof stageOrName === 'object') {
+    const tags = stageOrName.tags || [];
+    if (
+      tags.some(
+        (t) =>
+          String(t).toLowerCase() === 'transition' ||
+          /^ostim_dest:/i.test(String(t))
+      )
+    ) {
+      return true;
+    }
+    return /^Go to\s+/i.test(cleanStageName(stageOrName.name || ''));
+  }
+  return /^Go to\s+/i.test(cleanStageName(stageOrName));
 }
 
 /**

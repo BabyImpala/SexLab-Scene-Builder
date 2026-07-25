@@ -134,9 +134,12 @@ export function scoreEdge({
   getName,
   meta = null,
   mutual = false,
+  stageById = null,
 }) {
   const sourceName = getName(source) || source;
   const targetName = getName(target) || target;
+  const srcStage = stageById?.get(source);
+  const tgtStage = stageById?.get(target);
   let score = 50;
 
   if (looksLikeReturn(meta, sourceName, targetName)) {
@@ -166,16 +169,19 @@ export function scoreEdge({
   if (sn != null && tn != null && tn === sn + 1 && sf === tf) score += 100;
   if (sn != null && tn != null && tn < sn && sf === tf) score -= 80;
 
-  if (isTransitionStage(targetName)) score += 25;
-  if (isTransitionStage(sourceName) && !isTransitionStage(targetName)) score += 40;
+  if (isTransitionStage(tgtStage || targetName)) score += 25;
+  if (
+    isTransitionStage(srcStage || sourceName) &&
+    !isTransitionStage(tgtStage || targetName)
+  ) {
+    score += 40;
+  }
 
-  // Prefer leaving hubs toward actions, not arriving via alternate entries
   if (isHubName(sourceName) && !isHubName(targetName)) score += 30;
   if (!isHubName(sourceName) && isHubName(targetName) && !looksLikeReturn(meta, sourceName, targetName)) {
     score -= 40;
   }
 
-  // On mutual pairs, slightly prefer the higher-scored direction later via sort
   if (mutual && looksLikeReturn(meta, sourceName, targetName)) score -= 50;
 
   return score;
@@ -219,6 +225,7 @@ export function rankGraphEdges(sceneGraph, nodeIds, { getName, stages = [] } = {
         getName: nameOf,
         meta,
         mutual,
+        stageById: byId,
       });
       const sf = families.get(source);
       const tf = families.get(target);
@@ -238,7 +245,6 @@ export function rankGraphEdges(sceneGraph, nodeIds, { getName, stages = [] } = {
     }
   }
 
-  // On mutual pairs, demote the weaker direction to secondary when both look primary
   for (const [key, info] of edgeInfo) {
     const revKey = `${info.target}\0${info.source}`;
     const rev = edgeInfo.get(revKey);

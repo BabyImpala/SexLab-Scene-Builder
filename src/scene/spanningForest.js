@@ -62,7 +62,6 @@ export function pickForestRoots(sceneGraph, rootId, nodeIds, { getName, edgeInfo
 
   for (const { id, score } of scored) {
     if (score < 30) break;
-    // Extra roots only for strong hubs / zero-inbound nodes
     if ((inPrimary.get(id) || 0) === 0 || isHubName(nameOf(id))) {
       push(id);
     }
@@ -177,13 +176,10 @@ export function buildSpanningForest(
     }
   }
 
-  // Sort children by name for stable outline
   for (const [, kids] of children) {
     kids.sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
   }
 
-  /** Extra inbound edges not chosen as tree parent */
-  /** Extra inbound edges not chosen as tree parent */
   const secondaryInbound = new Map(ids.map((id) => [id, 0]));
   for (const source of ids) {
     for (const target of sceneGraph[source]?.dest || []) {
@@ -199,6 +195,7 @@ export function buildSpanningForest(
     families,
     secondaryInbound,
     ranks,
+    stages,
   });
 
   return {
@@ -220,9 +217,10 @@ export function buildSpanningForest(
 export function buildOutlineNodes(
   roots,
   children,
-  { getName, families, secondaryInbound, ranks } = {}
+  { getName, families, secondaryInbound, ranks, stages = [] } = {}
 ) {
   const nameOf = getName || ((id) => id);
+  const stageById = new Map((stages || []).map((s) => [s.id, s]));
   const walk = (id) => {
     const kids = children.get(id) || [];
     const extra = secondaryInbound?.get(id) || 0;
@@ -233,7 +231,7 @@ export function buildOutlineNodes(
       family: families?.get(id) || 'Other',
       rank: ranks?.get(id) ?? 0,
       extraEntries: extra,
-      isTransition: isTransitionStage(nameOf(id)),
+      isTransition: isTransitionStage(stageById.get(id) || nameOf(id)),
       isHub: isHubName(nameOf(id)),
       children: kids.map(walk),
     };
@@ -330,7 +328,6 @@ export function layoutFromForest(
       byCol.get(col).push(id);
     }
 
-    // Spill deep sibling stacks into sub-columns so one family isn't a skyscraper.
     const maxRows = large ? MAX_BAND_ROWS : Math.max(MAX_BAND_ROWS, 10);
     const local = new Map();
     let maxXCol = 0;
