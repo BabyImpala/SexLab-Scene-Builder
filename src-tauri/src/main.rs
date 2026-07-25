@@ -34,6 +34,7 @@ struct ProjectUpdatePayload<'a> {
     scenes: &'a indexmap::IndexMap<NanoID, Scene>,
     pack_name: &'a str,
     pack_author: &'a str,
+    pack_version: &'a str,
 }
 
 fn emit_project_update<R: Runtime>(emitter: &impl Emitter<R>, prjct: &Package) {
@@ -41,6 +42,7 @@ fn emit_project_update<R: Runtime>(emitter: &impl Emitter<R>, prjct: &Package) {
         scenes: &prjct.scenes,
         pack_name: &prjct.pack_name,
         pack_author: &prjct.pack_author,
+        pack_version: &prjct.pack_version,
     };
     if let Err(e) = emitter.emit("on_project_update", &payload) {
         error!("Failed to emit on_project_update: {}", e);
@@ -68,10 +70,87 @@ fn set_export_clip_tip_hidden(hidden: bool) {
     let _ = std::fs::write(path, if hidden { "1" } else { "0" });
 }
 
+fn export_merge_warn_pref_path() -> Option<std::path::PathBuf> {
+    dirs::data_local_dir().map(|d| d.join("SexLabSceneBuilder").join("hide_export_merge_warn"))
+}
+
+fn is_export_merge_warn_hidden() -> bool {
+    export_merge_warn_pref_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
+fn set_export_merge_warn_hidden(hidden: bool) {
+    let Some(path) = export_merge_warn_pref_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, if hidden { "1" } else { "0" });
+}
+
 fn run_export(app: AppHandle, kind: ExportKind) {
     tauri::async_runtime::spawn(async move {
-        let prjct = PROJECT.lock().unwrap();
-        if let Err(err) = prjct.export_as(&app, kind) {
+        let (pack_root, write_roots, fnis_mod) = {
+            let prjct = PROJECT.lock().unwrap();
+            match prjct.pick_export_paths(&app, kind) {
+                Ok((root, roots)) => (root, roots, prjct.fnis_mod_name()),
+                Err(err) => {
+                    if err != "Export cancelled" {
+                        error!("Failed to export project: {}", err);
+                        app.dialog()
+                            .message(&err)
+                            .title("Export failed")
+                            .kind(MessageDialogKind::Error)
+                            .buttons(MessageDialogButtons::Ok)
+                            .show(|_| {});
+                    }
+                    return;
+                }
+            }
+        };
+
+        let would_merge = write_roots
+            .iter()
+            .any(|p| project::package::dir_nonempty(p));
+        if would_merge && !is_export_merge_warn_hidden() {
+            let message = format!(
+                "Export writes into a subfolder named {fnis_mod} and soft-merges with anything already there.\n\n\
+                 Matching files are overwritten. Other files (such as .hkx animation clips) are kept.\n\n\
+                 Continue?"
+            );
+            let proceed = app
+                .dialog()
+                .message(message)
+                .title("Export merge")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Continue".into(),
+                    "Cancel".into(),
+                ))
+                .blocking_show();
+            if !proceed {
+                return;
+            }
+            let hide = app
+                .dialog()
+                .message("Don't warn about export overwrites again?")
+                .title("Export merge")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::YesNo)
+                .blocking_show();
+            if hide {
+                set_export_merge_warn_hidden(true);
+            }
+        }
+
+        let result = {
+            let prjct = PROJECT.lock().unwrap();
+            prjct.export_into(&pack_root, kind)
+        };
+        if let Err(err) = result {
             if err == "Export cancelled" {
                 return;
             }
@@ -95,7 +174,8 @@ fn start_export_with_tip(app: &AppHandle, kind: ExportKind) {
 
     let fnis_mod = PROJECT.lock().unwrap().fnis_mod_name();
     let message = format!(
-        "Export writes AnimLists, Behavior files, and registry data — not your .hkx animation clips.\n\n\
+        "Export writes into a subfolder named {fnis_mod} under the folder you pick.\n\n\
+         It writes AnimLists, Behavior files, and registry data — not your .hkx animation clips.\n\n\
          Copy your animation HKX files into:\n\
          meshes/actors/<race>/animations/{fnis_mod}/\n\n\
          For humans that is usually:\n\
@@ -410,6 +490,7 @@ fn main() {
             request_project_update,
             set_pack_name,
             set_pack_author,
+            set_pack_version,
             get_race_keys,
             create_blank_scene,
             save_scene,
@@ -878,6 +959,11 @@ fn set_pack_name(name: String) {
 #[tauri::command]
 fn set_pack_author(author: String) {
     PROJECT.lock().unwrap().pack_author = author;
+}
+
+#[tauri::command]
+fn set_pack_version(version: String) {
+    PROJECT.lock().unwrap().pack_version = version;
 }
 
 #[tauri::command]

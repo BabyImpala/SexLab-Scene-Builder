@@ -77,6 +77,7 @@ function App() {
   const [activeScene, updateActiveScene] = useImmer(null);
   const [packName, setPackName] = useState('');
   const [packAuthor, setPackAuthor] = useState('');
+  const [packVersion, setPackVersion] = useState('');
   const [edited, setEditedState] = useState(false);
   const editedRef = useRef(false);
   const setEdited = (v) => {
@@ -468,6 +469,7 @@ function App() {
       updateScenes(scns);
       setPackName(payload.pack_name ?? '');
       setPackAuthor(payload.pack_author ?? '');
+      setPackVersion(payload.pack_version ?? '');
       setEdited(false);
       if (scns.length) {
         // Show side panels before loading the scene so graph fit uses the
@@ -1086,6 +1088,18 @@ function App() {
                     const author = e.target.value;
                     setPackAuthor(author);
                     invoke('set_pack_author', { author });
+                    setEdited(true);
+                  }}
+                />
+                <input
+                  type="text"
+                  placeholder="Pack Version"
+                  className="sidebar-form"
+                  value={packVersion}
+                  onChange={(e) => {
+                    const version = e.target.value;
+                    setPackVersion(version);
+                    invoke('set_pack_version', { version });
                     setEdited(true);
                   }}
                 />
