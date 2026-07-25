@@ -462,6 +462,81 @@ function PositionField({ position, info, onChange }) {
             </Space>
           </Card>
         </Col>
+        <Col span={24}> {/* OStim author fill-ins */}
+          <Card
+            className="position-attribute-card position-ostim-compat-card"
+            size="small"
+            title={'OStim compatibility'}
+            extra={
+              <Tooltip className="tool-tip"
+                title={
+                  'Optional OStim actor fields. Stored in the project JSON and written on OStim export. Not used by .slr playback — fill these when authoring or converting packs for OStim.'
+                }
+              >
+                <Button type="text">Info</Button>
+              </Tooltip>
+            }
+          >
+            <Space direction="vertical" style={{ width: '100%' }} size="small">
+              <Space wrap size="middle">
+                <InputNumber
+                  addonBefore="lookUp"
+                  value={position.look_up ?? 0}
+                  min={-100}
+                  max={100}
+                  onChange={(v) =>
+                    onChange({ ...position, look_up: typeof v === 'number' ? v : 0 }, info)
+                  }
+                />
+                <InputNumber
+                  addonBefore="lookLeft"
+                  value={position.look_left ?? 0}
+                  min={-100}
+                  max={100}
+                  onChange={(v) =>
+                    onChange({ ...position, look_left: typeof v === 'number' ? v : 0 }, info)
+                  }
+                />
+                <InputNumber
+                  addonBefore="animIndex"
+                  placeholder="default"
+                  value={
+                    position.animation_index === null || position.animation_index === undefined
+                      ? null
+                      : position.animation_index
+                  }
+                  min={0}
+                  max={8}
+                  onChange={(v) =>
+                    onChange(
+                      {
+                        ...position,
+                        animation_index: typeof v === 'number' ? v : null,
+                      },
+                      info
+                    )
+                  }
+                />
+              </Space>
+              <Input
+                addonBefore="expression"
+                placeholder="e.g. tongue (expressionOverride)"
+                value={position.expression_override ?? ''}
+                onChange={(e) =>
+                  onChange({ ...position, expression_override: e.target.value }, info)
+                }
+              />
+              <Input
+                addonBefore="equip"
+                placeholder="OStim equip object types (space-separated)"
+                value={position.equip_objects ?? ''}
+                onChange={(e) =>
+                  onChange({ ...position, equip_objects: e.target.value }, info)
+                }
+              />
+            </Space>
+          </Card>
+        </Col>
       </Row>
     </div >
   );

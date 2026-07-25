@@ -54,6 +54,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       open_mouth: false,
       silent: false,
       strap_on: false,
+      look_up: 0,
+      look_left: 0,
+      animation_index: null,
+      expression_override: '',
+      equip_objects: '',
     });
     const merged = Array.from({ length: n }, (_, i) => ({
       position: stagePositions[i] || blankPos(),
