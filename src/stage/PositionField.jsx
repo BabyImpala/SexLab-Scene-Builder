@@ -104,7 +104,7 @@ function PositionField({ position, info, onChange }) {
             />
           </Card>
         </Col>
-        <Col span={9}> {/* Sex */}
+        <Col span={8}> {/* Sex */}
           <Card
             className="position-attribute-card"
             title={'Sex'}
@@ -130,6 +130,36 @@ function PositionField({ position, info, onChange }) {
                 </Checkbox>
               ))}
             </Space>
+          </Card>
+        </Col>
+        <Col span={8}> {/* SOS Angle */}
+          <Card
+            className="position-attribute-card"
+            title={'SOS Angle'}
+            extra={
+              <Tooltip className="tool-tip"
+                title={
+                  'Schlongs of Skyrim bend angle (−9…9). Used for male and futa actors; written to SLAL as sos on export.'
+                }
+              >
+                <Button type="text">Info</Button>
+              </Tooltip>
+            }
+          >
+            <InputNumber
+              className="position-schlong-input"
+              addonBefore="SOS"
+              controls
+              precision={0}
+              step={1}
+              min={-9}
+              max={9}
+              value={position.schlong ?? 0}
+              onChange={(e) => {
+                const v = typeof e === 'number' ? Math.max(-9, Math.min(9, e)) : 0;
+                onChange({ ...position, schlong: v }, info);
+              }}
+            />
           </Card>
         </Col>
         <Col span={24}>  {/* Animation (Basic) */}
@@ -398,6 +428,38 @@ function PositionField({ position, info, onChange }) {
                 onChange({ ...position, strip_data: newValue.length ? newValue : [stripOptions[0]] }, info);
               }}
             />
+          </Card>
+        </Col>
+        <Col span={24}> {/* SLAL-only flags */}
+          <Card
+            className="position-attribute-card position-slal-compat-card"
+            size="small"
+            title={'SLAL compatibility'}
+            extra={
+              <Tooltip className="tool-tip"
+                title={
+                  'Optional classic SLAL JSON flags for this position. Not used by SLSB/.slr playback — only written when exporting SLAL.'
+                }
+              >
+                <Button type="text">Info</Button>
+              </Tooltip>
+            }
+          >
+            <Space wrap size="middle">
+              {[
+                { attr: 'open_mouth', label: 'Open Mouth' },
+                { attr: 'silent', label: 'Silent' },
+                { attr: 'strap_on', label: 'Strap-on' },
+              ].map(({ attr, label }) => (
+                <Checkbox
+                  key={attr}
+                  checked={!!position[attr]}
+                  onChange={(e) => onChange({ ...position, [attr]: e.target.checked }, info)}
+                >
+                  {label}
+                </Checkbox>
+              ))}
+            </Space>
           </Card>
         </Col>
       </Row>

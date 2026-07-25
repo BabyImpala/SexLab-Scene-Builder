@@ -5,7 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import ReactDOM from "react-dom/client";
 import { useImmer } from "use-immer";
 import { FileDoneOutlined, TagsOutlined, SaveOutlined, TeamOutlined } from '@ant-design/icons';
-import { Input, Button, Tooltip, InputNumber, Card, Layout, Row, Col, Tabs, notification, Collapse, ConfigProvider } from 'antd';
+import { Input, Button, Tooltip, InputNumber, Card, Layout, Row, Col, Tabs, notification, Collapse, ConfigProvider, Select } from 'antd';
 
 import { tagsSFW, tagsNSFW } from "./common/Tags"
 import PositionField from "./stage/PositionField";
@@ -51,6 +51,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       tags: [],
       schlong: 0,
       add_cum: 0,
+      open_mouth: false,
+      silent: false,
+      strap_on: false,
     });
     const merged = Array.from({ length: n }, (_, i) => ({
       position: stagePositions[i] || blankPos(),
@@ -97,6 +100,7 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
   const [tags, setTags] = useState(_stage.tags || []);
   const [fixedLen, setFixedLen] = useState(_stage.extra?.fixed_len);
   const [navText, setNavText] = useState(_stage.extra?.nav_text || '');
+  const [sound, setSound] = useState(_stage.extra?.sound || '');
 
   useEffect(() => {
     const unlisten = listen('toggle_darkmode', (event) => {
@@ -180,6 +184,7 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
       extra: {
         fixed_len: fixedLen || 0.0,
         nav_text: navText || '',
+        sound: sound || '',
       },
     };
     console.log("Saving Stage... ", _sceneId, positionsInfo, stage);
@@ -297,7 +302,7 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
       children:
         <>
           <Row gutter={[2, 2]}>
-            <Col span={12}>
+            <Col span={8}>
               <Card
                 style={{ height: '100%' }}
                 title={'Navigation'}
@@ -323,7 +328,7 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
                 ></TextArea>
               </Card>
             </Col>
-            <Col span={12}>
+            <Col span={8}>
               <Card
                 style={{ height: '100%' }}
                 title={'Fixed Duration'}
@@ -349,6 +354,36 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
                   placeholder="0"
                   addonAfter={'ms'}
                   style={{ width: '100%' }}
+                />
+              </Card>
+            </Col>
+            <Col span={8}>
+              <Card
+                style={{ height: '100%' }}
+                title={'Sound (SLAL only)'}
+                extra={
+                  <Tooltip
+                    title={
+                      'Classic SLAL sound category for this stage (not used by SLSB/.slr). First non-empty stage sets the animation default; differing stages become per-stage overrides.'
+                    }
+                  >
+                    <Button type="text">Info</Button>
+                  </Tooltip>
+                }
+              >
+                <Select
+                  allowClear
+                  placeholder="Unset"
+                  style={{ width: '100%' }}
+                  value={sound || undefined}
+                  onChange={(v) => setSound(v || '')}
+                  options={[
+                    { value: 'Squishing', label: 'Squishing' },
+                    { value: 'Sucking', label: 'Sucking' },
+                    { value: 'SexMix', label: 'SexMix' },
+                    { value: 'none', label: 'none' },
+                    { value: 'NoSound', label: 'NoSound' },
+                  ]}
                 />
               </Card>
             </Col>

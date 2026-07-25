@@ -47,6 +47,91 @@ fn emit_project_update<R: Runtime>(emitter: &impl Emitter<R>, prjct: &Package) {
     }
 }
 
+fn export_tip_pref_path() -> Option<std::path::PathBuf> {
+    dirs::data_local_dir().map(|d| d.join("SexLabSceneBuilder").join("hide_export_clip_tip"))
+}
+
+fn is_export_clip_tip_hidden() -> bool {
+    export_tip_pref_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
+fn set_export_clip_tip_hidden(hidden: bool) {
+    let Some(path) = export_tip_pref_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, if hidden { "1" } else { "0" });
+}
+
+fn run_export(app: AppHandle, kind: ExportKind) {
+    tauri::async_runtime::spawn(async move {
+        let prjct = PROJECT.lock().unwrap();
+        if let Err(err) = prjct.export_as(&app, kind) {
+            if err == "Export cancelled" {
+                return;
+            }
+            error!("Failed to export project: {}", err);
+            app.dialog()
+                .message(&err)
+                .title("Export failed")
+                .kind(MessageDialogKind::Error)
+                .buttons(MessageDialogButtons::Ok)
+                .show(|_| {});
+        }
+    });
+}
+
+/// Show the Pandora clip-folder tip (unless dismissed), then open the export picker.
+fn start_export_with_tip(app: &AppHandle, kind: ExportKind) {
+    if is_export_clip_tip_hidden() {
+        run_export(app.clone(), kind);
+        return;
+    }
+
+    let fnis_mod = PROJECT.lock().unwrap().fnis_mod_name();
+    let message = format!(
+        "Export writes AnimLists, Behavior files, and registry data — not your .hkx animation clips.\n\n\
+         Copy your animation HKX files into:\n\
+         meshes/actors/<race>/animations/{fnis_mod}/\n\n\
+         For humans that is usually:\n\
+         meshes/actors/character/animations/{fnis_mod}/\n\n\
+         Pandora only plays clips that live in the folder the Behavior references."
+    );
+
+    let app_continue = app.clone();
+    app.dialog()
+        .message(message)
+        .title("Animation clips for Pandora")
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Continue".into(),
+            "Cancel".into(),
+        ))
+        .show(move |proceed| {
+            if !proceed {
+                return;
+            }
+            let app_hide = app_continue.clone();
+            app_continue
+                .dialog()
+                .message("Don't show this tip again on export?")
+                .title("Export tip")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::YesNo)
+                .show(move |hide| {
+                    if hide {
+                        set_export_clip_tip_hidden(true);
+                    }
+                    run_export(app_hide, kind);
+                });
+        });
+}
+
 pub static PROJECT: Lazy<Mutex<Package>> = Lazy::new(|| {
     let prjct = Package::new();
     Mutex::new(prjct)
@@ -304,6 +389,7 @@ const NEW_PROJECT: &str = "new_prjct";
 const OPEN_PROJECT: &str = "open_prjct";
 const IMPORT_SLAL: &str = "import_slal";
 const ENRICH_SLANIM: &str = "enrich_slanim";
+const ENRICH_FNIS: &str = "enrich_fnis";
 const THEME_SYSTEM: &str = "theme_system";
 const THEME_LIGHT: &str = "theme_light";
 const THEME_DARK: &str = "theme_dark";
@@ -485,6 +571,13 @@ fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
                 true,
                 Option::<&str>::None,
             )?,
+            &MenuItem::with_id(
+                app,
+                ENRICH_FNIS,
+                "Enrich from FNIS AnimList...",
+                true,
+                Option::<&str>::None,
+            )?,
         ])
         .separator()
         .items(&[
@@ -637,19 +730,7 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                 "export_slal" => ExportKind::Slal,
                 _ => ExportKind::Both,
             };
-            let app = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let prjct = PROJECT.lock().unwrap();
-                if let Err(err) = prjct.export_as(&app, kind) {
-                    error!("Failed to export project: {}", err);
-                    app.dialog()
-                        .message(&err)
-                        .title("Export failed")
-                        .kind(MessageDialogKind::Error)
-                        .buttons(MessageDialogButtons::Ok)
-                        .show(|_| {});
-                }
-            });
+            start_export_with_tip(app, kind);
         }
         THEME_SYSTEM => {
             apply_system_theme(app);
@@ -726,6 +807,39 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                         app.dialog()
                             .message(summary.message())
                             .title("Enrich from SLAnim source")
+                            .kind(kind)
+                            .buttons(MessageDialogButtons::Ok)
+                            .show(|_| {});
+                    }
+                    Err(err) => {
+                        error!("{}", err);
+                        app.dialog()
+                            .message(&err)
+                            .title("Enrich failed")
+                            .kind(MessageDialogKind::Error)
+                            .buttons(MessageDialogButtons::Ok)
+                            .show(|_| {});
+                    }
+                }
+            });
+        }
+        ENRICH_FNIS => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut prjct = PROJECT.lock().unwrap();
+                match prjct.enrich_from_fnis_lists(&app) {
+                    Ok(summary) => {
+                        set_edited(true);
+                        let window = app.get_webview_window(MAIN_WINDOW).unwrap();
+                        emit_project_update(&window, &prjct);
+                        let kind = if summary.positions_updated > 0 {
+                            MessageDialogKind::Info
+                        } else {
+                            MessageDialogKind::Warning
+                        };
+                        app.dialog()
+                            .message(summary.message_fnis())
+                            .title("Enrich from FNIS AnimList")
                             .kind(kind)
                             .buttons(MessageDialogButtons::Ok)
                             .show(|_| {});

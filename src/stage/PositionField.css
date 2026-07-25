@@ -11,3 +11,14 @@
 .position-strip-tree {
   width: 100%;
 }
+
+/* Classic SLAL-only extras: present but clearly secondary to SLSB authoring. */
+.position-slal-compat-card.ant-card {
+  opacity: 0.92;
+}
+
+.position-slal-compat-card .ant-card-head-title {
+  font-weight: 500;
+  font-size: 13px;
+  opacity: 0.75;
+}

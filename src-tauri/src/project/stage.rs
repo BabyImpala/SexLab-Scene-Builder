@@ -19,6 +19,9 @@ pub struct Stage {
 pub struct Extra {
     pub fixed_len: f32,
     pub nav_text: String,
+    /// SLAL sound category (Squishing / Sucking / SexMix / none / NoSound). Project JSON only.
+    #[serde(default)]
+    pub sound: String,
 }
 
 impl Stage {
@@ -36,7 +39,11 @@ impl Stage {
                 |s| s.positions.iter().map(|p| Position::new(Some(p))).collect(),
             ),
             tags: parent_scene.tags.clone(),
-            extra: Default::default(),
+            extra: stage.map_or_else(Extra::default, |s| Extra {
+                fixed_len: 0.0,
+                nav_text: String::new(),
+                sound: s.extra.sound.clone(),
+            }),
         }
     }
 

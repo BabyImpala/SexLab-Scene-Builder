@@ -16,6 +16,10 @@ use crate::{
         define::{Node, Sex},
         position::Position,
         serialize::{make_fnis_lines, make_fnis_lines_slal_sequence, map_race_to_folder},
+        fnis_list::{
+            lookup_fnis_objects, objects_to_anim_obj as fnis_objects_to_anim_obj,
+            parse_fnis_list_file, FnisAnimObjects,
+        },
         slanim_source::{objects_to_anim_obj, parse_slanim_source_file, SourceAnim},
     },
     racekeys::{map_legacy_to_racekey, map_racekey_to_legacy},
@@ -43,9 +47,19 @@ pub struct EnrichSummary {
 
 impl EnrichSummary {
     pub fn message(&self) -> String {
+        self.message_labeled("Source files", "Animations in source")
+    }
+
+    pub fn message_fnis(&self) -> String {
+        self.message_labeled("AnimList files", "Events with AnimObjects")
+    }
+
+    fn message_labeled(&self, files_label: &str, anims_label: &str) -> String {
         let mut msg = format!(
-            "Source files: {}\nAnimations in source: {}\nScenes enriched: {}\nPositions updated: {}",
+            "{}: {}\n{}: {}\nScenes enriched: {}\nPositions updated: {}",
+            files_label,
             self.files,
+            anims_label,
             self.animations_in_source,
             self.scenes_enriched,
             self.positions_updated
@@ -58,7 +72,7 @@ impl EnrichSummary {
                 .cloned()
                 .collect();
             msg.push_str(&format!(
-                "\nUnmatched animation ids ({}): {}",
+                "\nUnmatched ({}): {}",
                 self.unmatched_ids.len(),
                 preview.join(", ")
             ));
@@ -263,6 +277,59 @@ impl Package {
         Ok(summary)
     }
 
+    pub fn enrich_from_fnis_lists(
+        &mut self,
+        app: &tauri::AppHandle,
+    ) -> Result<EnrichSummary, String> {
+        let paths = app
+            .dialog()
+            .file()
+            .set_title("Enrich from FNIS AnimList")
+            .add_filter("FNIS AnimList", &["txt"])
+            .blocking_pick_files()
+            .ok_or("No FNIS AnimList selected".to_string())?;
+
+        let mut paths_buf = Vec::new();
+        for p in paths {
+            paths_buf.push(p.into_path().map_err(|e| e.to_string())?);
+        }
+        self.enrich_from_fnis_paths(&paths_buf)
+    }
+
+    pub fn enrich_from_fnis_paths(
+        &mut self,
+        paths: &[PathBuf],
+    ) -> Result<EnrichSummary, String> {
+        let mut summary = EnrichSummary {
+            files: paths.len(),
+            ..Default::default()
+        };
+        let mut merged: HashMap<String, FnisAnimObjects> = HashMap::new();
+        for path in paths {
+            let parsed = parse_fnis_list_file(path)?;
+            for (event, objs) in parsed {
+                merged.insert(event, objs);
+            }
+        }
+        summary.animations_in_source = merged.len();
+
+        let mut matched_events: HashSet<String> = HashSet::new();
+        for scene in self.scenes.values_mut() {
+            let updated = apply_fnis_objects(scene, &merged, &mut matched_events);
+            if updated > 0 {
+                summary.scenes_enriched += 1;
+                summary.positions_updated += updated;
+            }
+        }
+        for event in merged.keys() {
+            if !matched_events.contains(event) {
+                summary.unmatched_ids.push(event.clone());
+            }
+        }
+        summary.unmatched_ids.sort();
+        Ok(summary)
+    }
+
     pub fn from_slal(path: PathBuf) -> Result<Package, String> {
         let file = fs::File::open(&path).map_err(|e| e.to_string())?;
 
@@ -329,20 +396,10 @@ impl Package {
                         edit_position.offset.r = v as f32;
                     }
                     if evt.get("open_mouth").and_then(|v| v.as_bool()) == Some(true) {
-                        log::warn!(
-                            "Dropping open_mouth on '{}' actor {} stage {} (not stored in SLSB)",
-                            scene.name,
-                            n + 1,
-                            i + 1
-                        );
+                        edit_position.open_mouth = true;
                     }
                     if evt.get("silent").and_then(|v| v.as_bool()) == Some(true) {
-                        log::warn!(
-                            "Dropping silent on '{}' actor {} stage {} (not stored in SLSB)",
-                            scene.name,
-                            n + 1,
-                            i + 1
-                        );
+                        edit_position.silent = true;
                     }
                     if let Some(sos) = evt.get("sos").and_then(|v| v.as_i64()) {
                         // Persist in project JSON (not .slr); mirrors convert tracking
@@ -353,6 +410,7 @@ impl Package {
                         || evt.get("strap_on").and_then(|v| v.as_str()) == Some("True")
                         || evt.get("strap_on").and_then(|v| v.as_str()) == Some("true")
                     {
+                        edit_position.strap_on = true;
                         actor_strap_on = true;
                     }
                     match sex.as_str() {
@@ -419,11 +477,15 @@ impl Package {
                     Some(list)
                 })
                 .unwrap_or_default();
-            if animation.get("sound").and_then(|v| v.as_str()).is_some() {
-                log::warn!(
-                    "Dropping animation-level sound on '{}' (not stored in SLSB)",
-                    scene.name
-                );
+            if let Some(anim_sound) = animation.get("sound").and_then(|v| v.as_str()) {
+                let sound = anim_sound.trim();
+                if !sound.is_empty() {
+                    for stage in &mut scene.stages {
+                        if stage.extra.sound.is_empty() {
+                            stage.extra.sound = sound.to_string();
+                        }
+                    }
+                }
             }
             let stage_extra = animation
                 .get("stages")
@@ -443,12 +505,11 @@ impl Package {
                         if timer_sec > 0.0 {
                             stage.extra.fixed_len = (timer_sec * 1000.0).round() as f32;
                         }
-                        if extra.get("sound").and_then(|v| v.as_str()).is_some() {
-                            log::warn!(
-                                "Dropping per-stage sound on '{}' stage {} (not stored in SLSB)",
-                                scene.name,
-                                i + 1
-                            );
+                        if let Some(sound) = extra.get("sound").and_then(|v| v.as_str()) {
+                            let sound = sound.trim();
+                            if !sound.is_empty() {
+                                stage.extra.sound = sound.to_string();
+                            }
                         }
                     }
                 }
@@ -671,7 +732,7 @@ impl Package {
     }
 
     fn write_binary_file(&self, root_dir: &PathBuf) -> Result<(), std::io::Error> {
-        let target_dir = root_dir.join("SKSE\\SexLab\\Registry\\");
+        let target_dir = root_dir.join("SKSE").join("SexLab").join("Registry");
         let project_name = format!(
             "{}.slr",
             if self.pack_name.is_empty() {
@@ -729,7 +790,7 @@ impl Package {
                 }
             }
         }
-        flush_fnis_lists(root_dir, &self.pack_name, &events, false)
+        flush_fnis_lists(root_dir, &self.fnis_mod_name(), &events, false)
     }
 
     fn write_fnis_files_slal(&self, root_dir: &PathBuf) -> Result<(), String> {
@@ -796,8 +857,58 @@ impl Package {
             .iter()
             .map(|(k, v)| (k.as_str(), v.clone()))
             .collect();
-        flush_fnis_lists(root_dir, &self.pack_name, &borrowed, true).map_err(|e| e.to_string())
+        flush_fnis_lists(root_dir, &self.fnis_mod_name(), &borrowed, true).map_err(|e| e.to_string())
     }
+
+    /// Folder + `FNIS_<id>_*` stem under `animations/` / `behaviors/`.
+    /// Prefers `Author_PackName` so two authors shipping the same pack name do not collide.
+    pub fn fnis_mod_name(&self) -> String {
+        build_fnis_mod_name(&self.pack_name, &self.pack_author, &self.prefix_hash.0)
+    }
+}
+
+fn build_fnis_mod_name(pack_name: &str, pack_author: &str, prefix_hash: &str) -> String {
+    let pack = {
+        let trimmed = pack_name.trim();
+        if trimmed.is_empty() {
+            prefix_hash.to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    let author = sanitize_fnis_segment(pack_author);
+    if author.is_empty() {
+        return pack;
+    }
+    // Converted Billyy packs already use Author_Theme names (Billyy_Human); don't double-prefix.
+    let pack_lower = pack.to_ascii_lowercase();
+    let author_lower = author.to_ascii_lowercase();
+    if pack_lower == author_lower || pack_lower.starts_with(&format!("{author_lower}_")) {
+        return pack;
+    }
+    format!("{author}_{pack}")
+}
+
+/// Keep FNIS path segments filesystem- and AnimList-safe.
+fn sanitize_fnis_segment(raw: &str) -> String {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else if c.is_whitespace() {
+                '_'
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .split('_')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    cleaned
 }
 
 fn split_anim_objs(anim_obj: &str) -> Vec<String> {
@@ -856,23 +967,28 @@ fn flush_fnis_lists(
     for (racekey, anim_events) in events {
         let target_folder = map_race_to_folder(racekey)
             .expect(format!("Cannot find folder for RaceKey {}", racekey).as_str());
-        let path = root_dir.join(format!(
-            "meshes\\actors\\{}\\animations\\{}",
-            target_folder, pack_name
-        ));
-        let crt = &target_folder[target_folder
-            .find('\\')
-            .and_then(|w| Some(w + 1))
-            .unwrap_or(0)..];
+        // Join component-wise so Linux and Windows both get meshes/actors/<race>/...
+        // (a single "meshes\\actors\\..." string is one path segment on Unix).
+        let mut path = root_dir.join("meshes").join("actors");
+        for part in target_folder.split(['/', '\\']).filter(|p| !p.is_empty()) {
+            path.push(part);
+        }
+        path.push("animations");
+        path.push(pack_name);
+        let crt = Path::new(&target_folder)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(target_folder.as_str());
         fs::create_dir_all(&path)?;
 
         let create = |file_path: PathBuf| -> Result<(), std::io::Error> {
             let name = file_path.to_str().unwrap_or("NONE").to_string();
             let file = fs::File::create(file_path)?;
             let mut file = BufWriter::new(file);
+            // FNIS / Pandora AnimLists on Windows are CRLF; LF-only lists are often ignored.
             if slal_header {
-                writeln!(file, "Version V1.0")?;
-                writeln!(file)?;
+                write_fnis_line(&mut file, "Version V1.0")?;
+                write_fnis_line(&mut file, "")?;
             }
             info!(
                 "Adding {} lines to race {} |||||| file: {}",
@@ -881,7 +997,7 @@ fn flush_fnis_lists(
                 name
             );
             for anim_event in anim_events {
-                writeln!(file, "{}", anim_event)?;
+                write_fnis_line(&mut file, anim_event)?;
             }
             Ok(())
         };
@@ -896,6 +1012,12 @@ fn flush_fnis_lists(
         }?;
     }
     info!("---------------------------------------------------------");
+    Ok(())
+}
+
+fn write_fnis_line(file: &mut BufWriter<fs::File>, line: &str) -> Result<(), std::io::Error> {
+    file.write_all(line.as_bytes())?;
+    file.write_all(b"\r\n")?;
     Ok(())
 }
 
@@ -972,6 +1094,35 @@ fn apply_source_objects(scene: &mut Scene, anim: &SourceAnim) -> usize {
                 continue;
             };
             let converted = objects_to_anim_obj(obj);
+            if pos.anim_obj != converted {
+                pos.anim_obj = converted;
+                updated += 1;
+            }
+        }
+    }
+    updated
+}
+
+/// Apply AnimObjects from FNIS lists onto matching stage positions (overwrites when found).
+fn apply_fnis_objects(
+    scene: &mut Scene,
+    map: &HashMap<String, FnisAnimObjects>,
+    matched_events: &mut HashSet<String>,
+) -> usize {
+    let mut updated = 0;
+    for stage in &mut scene.stages {
+        for pos in &mut stage.positions {
+            let Some(event) = pos.event.first().filter(|e| !e.is_empty()) else {
+                continue;
+            };
+            let Some((map_key, objs)) = lookup_fnis_objects(map, event) else {
+                continue;
+            };
+            matched_events.insert(map_key.to_string());
+            let converted = fnis_objects_to_anim_obj(&objs.anim_objs);
+            if converted.is_empty() {
+                continue;
+            }
             if pos.anim_obj != converted {
                 pos.anim_obj = converted;
                 updated += 1;
@@ -1211,7 +1362,13 @@ fn scene_to_slal_animation(scene: &Scene) -> Result<serde_json::Value, String> {
                 stage_obj["up"] = serde_json::json!(off.z);
                 stage_obj["rotate"] = serde_json::json!(off.r);
             }
-            if strap_on {
+            if pos.open_mouth {
+                stage_obj["open_mouth"] = serde_json::json!(true);
+            }
+            if pos.silent {
+                stage_obj["silent"] = serde_json::json!(true);
+            }
+            if pos.strap_on || strap_on {
                 stage_obj["strap_on"] = serde_json::json!(true);
             }
             if pos.schlong != 0 {
@@ -1245,13 +1402,37 @@ fn scene_to_slal_animation(scene: &Scene) -> Result<serde_json::Value, String> {
         actors.push(actor);
     }
 
+    let anim_sound = stages
+        .iter()
+        .map(|s| s.extra.sound.trim())
+        .find(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
     let mut stage_params = Vec::new();
     for (i, stage) in stages.iter().enumerate() {
+        let mut stage_param = serde_json::Map::new();
+        let mut has_fields = false;
         if stage.extra.fixed_len > 0.0 {
-            stage_params.push(serde_json::json!({
-                "number": i + 1,
-                "timer": slal_timer_seconds(stage.extra.fixed_len),
-            }));
+            stage_param.insert(
+                "timer".into(),
+                serde_json::json!(slal_timer_seconds(stage.extra.fixed_len)),
+            );
+            has_fields = true;
+        }
+        let stage_sound = stage.extra.sound.trim();
+        if !stage_sound.is_empty() {
+            let differs = anim_sound
+                .as_deref()
+                .map(|a| a != stage_sound)
+                .unwrap_or(false);
+            if differs {
+                stage_param.insert("sound".into(), serde_json::json!(stage_sound));
+                has_fields = true;
+            }
+        }
+        if has_fields {
+            stage_param.insert("number".into(), serde_json::json!(i + 1));
+            stage_params.push(serde_json::Value::Object(stage_param));
         }
         if !stage.extra.nav_text.is_empty() {
             log::warn!(
@@ -1272,6 +1453,9 @@ fn scene_to_slal_animation(scene: &Scene) -> Result<serde_json::Value, String> {
     }
     if let Some(race) = creature_race {
         anim["creature_race"] = serde_json::json!(race);
+    }
+    if let Some(sound) = anim_sound {
+        anim["sound"] = serde_json::json!(sound);
     }
     if !stage_params.is_empty() {
         anim["stages"] = serde_json::json!(stage_params);
@@ -1315,9 +1499,61 @@ impl EncodeBinary for Package {
 
 #[cfg(test)]
 mod tests {
-    use super::{infer_add_cum, strip_actor_stage_suffix};
+    use super::{
+        build_fnis_mod_name, flush_fnis_lists, infer_add_cum, scene_to_slal_animation,
+        strip_actor_stage_suffix, write_fnis_line, Package,
+    };
     use crate::project::define::Sex;
+    use crate::project::position::Position;
     use crate::project::position_info::PositionInfo;
+    use crate::project::scene::Scene;
+    use crate::project::serialize::map_race_to_folder;
+    use crate::project::stage::{Extra as StageExtra, Stage};
+    use crate::project::NanoID;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn test_stage(id: &str, positions: Vec<Position>, sound: &str) -> Stage {
+        Stage {
+            id: NanoID(id.into()),
+            name: String::new(),
+            positions,
+            tags: vec![],
+            extra: StageExtra {
+                fixed_len: 0.0,
+                nav_text: String::new(),
+                sound: sound.into(),
+            },
+        }
+    }
+
+    fn test_pos(event: &str) -> Position {
+        let mut p = Position::new(None);
+        p.event = vec![event.into()];
+        p
+    }
+
+    #[test]
+    fn fnis_mod_name_uses_author_and_pack() {
+        assert_eq!(
+            build_fnis_mod_name("AnPack", "3jiou", "xxxx"),
+            "3jiou_AnPack"
+        );
+        assert_eq!(
+            build_fnis_mod_name("AnPack", "Miss Corruption", "xxxx"),
+            "Miss_Corruption_AnPack"
+        );
+        // No author → pack only
+        assert_eq!(build_fnis_mod_name("AnPack", "", "yhd9"), "AnPack");
+        // Empty pack → hash fallback
+        assert_eq!(build_fnis_mod_name("", "3jiou", "yhd9"), "3jiou_yhd9");
+        // Already prefixed (Billyy_Human) → do not double
+        assert_eq!(
+            build_fnis_mod_name("Billyy_Human", "Billyy", "5a3f"),
+            "Billyy_Human"
+        );
+    }
 
     #[test]
     fn strips_actor_stage_event_suffix() {
@@ -1370,8 +1606,271 @@ mod tests {
     }
 
     #[test]
+    fn slal_export_emits_position_flags_and_sos() {
+        let mut female = test_pos("TestAnim_A1_S1");
+        female.open_mouth = true;
+        female.silent = true;
+        let mut male = test_pos("TestAnim_A2_S1");
+        male.strap_on = true;
+        male.schlong = 4;
+
+        let stage = test_stage("stg1", vec![female, male], "");
+        let scene = Scene {
+            name: "Test Anim".into(),
+            stages: vec![stage],
+            positions: vec![
+                PositionInfo {
+                    sex: Sex {
+                        male: false,
+                        female: true,
+                        futa: false,
+                    },
+                    ..Default::default()
+                },
+                PositionInfo {
+                    sex: Sex {
+                        male: true,
+                        female: false,
+                        futa: false,
+                    },
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let anim = scene_to_slal_animation(&scene).unwrap();
+        let actors = anim["actors"].as_array().unwrap();
+        let f0 = &actors[0]["stages"][0];
+        assert_eq!(f0["open_mouth"], true);
+        assert_eq!(f0["silent"], true);
+        assert!(f0.get("strap_on").is_none());
+        assert!(f0.get("sos").is_none());
+
+        let m0 = &actors[1]["stages"][0];
+        assert_eq!(m0["strap_on"], true);
+        assert_eq!(m0["sos"], 4);
+        assert!(m0.get("open_mouth").is_none());
+    }
+
+    #[test]
+    fn slal_export_male_futa_still_writes_strap_on() {
+        let male = test_pos("TestAnim_A1_S1");
+        let stage = test_stage("stg1", vec![male], "");
+        let scene = Scene {
+            name: "Futa Slot".into(),
+            stages: vec![stage],
+            positions: vec![PositionInfo {
+                sex: Sex {
+                    male: true,
+                    female: false,
+                    futa: true,
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let anim = scene_to_slal_animation(&scene).unwrap();
+        assert_eq!(anim["actors"][0]["type"], "Male");
+        assert_eq!(anim["actors"][0]["stages"][0]["strap_on"], true);
+    }
+
+    #[test]
+    fn slal_export_emits_anim_sound_and_stage_override() {
+        let s1 = test_stage("stg1", vec![test_pos("SoundAnim_A1_S1")], "Squishing");
+        let s2 = test_stage("stg2", vec![test_pos("SoundAnim_A1_S2")], "Sucking");
+        let scene = Scene {
+            name: "Sound Test".into(),
+            stages: vec![s1, s2],
+            positions: vec![PositionInfo {
+                sex: Sex {
+                    male: false,
+                    female: true,
+                    futa: false,
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let anim = scene_to_slal_animation(&scene).unwrap();
+        assert_eq!(anim["sound"], "Squishing");
+        let stages = anim["stages"].as_array().unwrap();
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0]["number"], 2);
+        assert_eq!(stages[0]["sound"], "Sucking");
+    }
+
+    #[test]
+    fn enrich_from_fnis_overwrites_anim_obj_by_event() {
+        let mut male = test_pos("yhd9B_Billyy_ChairDildo_A1_S1");
+        male.anim_obj = String::new();
+        let stage = test_stage("stg1", vec![male], "");
+        let mut pack = Package::new();
+        let scene = Scene {
+            name: "Chair Dildo".into(),
+            stages: vec![stage],
+            positions: vec![PositionInfo {
+                sex: Sex {
+                    male: false,
+                    female: true,
+                    futa: false,
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        pack.scenes.insert(scene.id.clone(), scene);
+
+        let tmp = std::env::temp_dir().join(format!(
+            "slsb_fnis_enrich_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let list = tmp.join("FNIS_Test_List.txt");
+        fs::write(
+            &list,
+            "s -o B_Billyy_ChairDildo_A1_S1 Chair.hkx AOChairA AOShockyDogDildoB\n",
+        )
+        .unwrap();
+
+        let summary = pack.enrich_from_fnis_paths(&[list]).unwrap();
+        assert_eq!(summary.positions_updated, 1);
+        let scene = pack.scenes.values().next().unwrap();
+        assert_eq!(
+            scene.stages[0].positions[0].anim_obj,
+            "AOChairA,AOShockyDogDildoB"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn slal_timer_converts_ms_to_seconds() {
         assert!((super::slal_timer_seconds(5000.0) - 5.0).abs() < f32::EPSILON);
         assert_eq!(super::slal_timer_seconds(0.0), 0.0);
+    }
+
+    #[test]
+    fn race_folders_use_forward_slashes() {
+        assert_eq!(map_race_to_folder("Human").unwrap(), "character");
+        assert_eq!(map_race_to_folder("Ash Hopper").unwrap(), "dlc02/scrib");
+        assert_eq!(map_race_to_folder("Chaurus Hunter").unwrap(), "dlc01/chaurusflyer");
+        assert!(!map_race_to_folder("Boar").unwrap().contains('\\'));
+    }
+
+    #[test]
+    fn fnis_lists_use_nested_paths_and_crlf() {
+        let tmp = std::env::temp_dir().join(format!(
+            "slsb_fnis_layout_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let mut events: HashMap<&str, Vec<String>> = HashMap::new();
+        events.insert("Human", vec!["b -md abcdEvent Event.hkx".into()]);
+        events.insert(
+            "Ash Hopper",
+            vec!["b -md abcdHopper Hopper.hkx".into()],
+        );
+        flush_fnis_lists(&tmp, "AnPack", &events, false).unwrap();
+
+        let human = tmp
+            .join("meshes")
+            .join("actors")
+            .join("character")
+            .join("animations")
+            .join("AnPack")
+            .join("FNIS_AnPack_List.txt");
+        let hopper = tmp
+            .join("meshes")
+            .join("actors")
+            .join("dlc02")
+            .join("scrib")
+            .join("animations")
+            .join("AnPack")
+            .join("FNIS_AnPack_scrib_List.txt");
+        assert!(human.is_file(), "missing {}", human.display());
+        assert!(hopper.is_file(), "missing {}", hopper.display());
+
+        let human_bytes = fs::read(&human).unwrap();
+        assert!(
+            human_bytes.windows(2).any(|w| w == b"\r\n"),
+            "AnimList must use CRLF for Pandora/FNIS on Windows"
+        );
+        assert_eq!(
+            human_bytes.iter().filter(|&&b| b == b'\n').count(),
+            human_bytes.windows(2).filter(|w| *w == b"\r\n").count(),
+            "every LF must be part of CRLF"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn write_fnis_line_emits_crlf() {
+        let tmp = std::env::temp_dir().join(format!("slsb_fnis_line_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("list.txt");
+        {
+            let file = fs::File::create(&path).unwrap();
+            let mut w = std::io::BufWriter::new(file);
+            write_fnis_line(&mut w, "b -md abcdE E.hkx").unwrap();
+            write_fnis_line(&mut w, "").unwrap();
+        }
+        assert_eq!(fs::read(&path).unwrap(), b"b -md abcdE E.hkx\r\n\r\n");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn billy_human_build_writes_detectable_layout() {
+        let src = PathBuf::from(
+            "/mnt/Data/Coding/SLAL Packs/Billy SLP/SLAL_Billyy_Human/SKSE/SexLab/Registry/Source/Billyy_Human.slsb.json",
+        );
+        if !src.is_file() {
+            eprintln!("skip: Billy SLP source missing at {}", src.display());
+            return;
+        }
+        let file = fs::File::open(&src).unwrap();
+        let project = Package::from_file(file).unwrap();
+        let out = std::env::temp_dir().join(format!(
+            "slsb_billy_build_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&out);
+        project.build(out.clone()).unwrap();
+
+        let list = out
+            .join("meshes")
+            .join("actors")
+            .join("character")
+            .join("animations")
+            .join("Billyy_Human")
+            .join("FNIS_Billyy_Human_List.txt");
+        let behavior = out
+            .join("meshes")
+            .join("actors")
+            .join("character")
+            .join("behaviors")
+            .join("FNIS_Billyy_Human_Behavior.hkx");
+        let slr = out
+            .join("SKSE")
+            .join("SexLab")
+            .join("Registry")
+            .join("Billyy_Human.slr");
+        assert!(list.is_file(), "missing AnimList {}", list.display());
+        assert!(behavior.is_file(), "missing Behavior {}", behavior.display());
+        assert!(slr.is_file(), "missing registry {}", slr.display());
+        let list_bytes = fs::read(&list).unwrap();
+        assert!(list_bytes.windows(2).any(|w| w == b"\r\n"));
+        // Behavior gen only succeeds when AnimList path matches Pandora layout.
+        assert!(
+            crate::project::behavior_gen::behavior_path_for_list(&list).is_some(),
+            "AnimList path not recognized as FNIS layout: {}",
+            list.display()
+        );
+
+        let _ = fs::remove_dir_all(&out);
     }
 }

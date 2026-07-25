@@ -23,6 +23,12 @@ pub struct Position {
     pub schlong: i8,
     #[serde(default)]
     pub add_cum: i32,
+    #[serde(default)]
+    pub open_mouth: bool,
+    #[serde(default)]
+    pub silent: bool,
+    #[serde(default)]
+    pub strap_on: bool,
     #[serde(skip_serializing, default)]
     pub extra: Extra,
     #[serde(skip_serializing, default)]
@@ -47,6 +53,9 @@ impl Position {
             race: "Human".into(),
             schlong: reference.map_or(0, |pos| pos.schlong),
             add_cum: reference.map_or(0, |pos| pos.add_cum),
+            open_mouth: reference.map_or(false, |pos| pos.open_mouth),
+            silent: reference.map_or(false, |pos| pos.silent),
+            strap_on: reference.map_or(false, |pos| pos.strap_on),
             extra: Default::default(),
             scale: 1.0,
         }
