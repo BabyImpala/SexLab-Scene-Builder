@@ -17,6 +17,8 @@ const { confirm } = Modal;
 import { STAGE_EDGE, STAGE_EDGE_SHAPEID, forwardEdgeAttrs } from "./scene/SceneEdge"
 import { Furnitures } from "./common/Furniture";
 import "./scene/SceneNode"
+import { applyNodeSlots } from "./scene/SceneNode"
+import { isTransitionStage } from "./scene/stageFamily"
 import {
   graphCoordsStacked,
   planToEdgeConfig,
@@ -29,6 +31,10 @@ import {
   applyNodeFamilyDim,
   sceneGraphSignature,
 } from "./scene/graphPresentation"
+import {
+  expandCanvasToStoredGraph,
+  shortTransitionLabel,
+} from "./scene/transitionCollapse"
 import {
   buildCanvasSvg,
   buildCanvasLayoutJson,
@@ -92,7 +98,6 @@ function App() {
   const [cloneToTargetId, setCloneToTargetId] = useState(null);
   const inEdit = useRef(false);
   const [showAreas, setShowAreas] = useState(false);
-  /** browse = mind-map skin (primary tree); edit = state-machine wiring */
   const [graphWorkMode, setGraphWorkMode] = useState('browse'); // browse | edit
   const [edgeFilterMode, setEdgeFilterMode] = useState('primary'); // primary | neighborhood | family | all
   const [focusNodeIds, setFocusNodeIds] = useState([]);
@@ -100,13 +105,15 @@ function App() {
   const [navOutline, setNavOutline] = useState([]);
   const [showOutline, setShowOutline] = useState(true);
   const [pathIds, setPathIds] = useState([]);
+  const [showTransitions, setShowTransitions] = useState(false);
+  const showTransitionsRef = useRef(false);
+  const fullGraphRef = useRef({});
   const graphMetaRef = useRef({
     families: new Map(),
     hubReturnCounts: new Map(),
     clusters: [],
     forest: null,
   });
-  /** Cached full presentation — invalidated when topology/positions change. */
   const presentationCacheRef = useRef(null);
   const layoutDirtyRef = useRef(false);
   const edgeFilterModeRef = useRef(edgeFilterMode);
@@ -118,10 +125,16 @@ function App() {
   const refreshGraphEdgesRef = useRef(() => {});
   const rebuildGraphPresentationRef = useRef(() => {});
   const activeSceneRef = useRef(null);
+  const insertingTransitionRef = useRef(false);
+  const suppressingNodeRemoveRef = useRef(false);
 
   useEffect(() => {
     activeSceneRef.current = activeScene;
   }, [activeScene]);
+
+  useEffect(() => {
+    showTransitionsRef.current = showTransitions;
+  }, [showTransitions]);
 
   useEffect(() => {
     edgeFilterModeRef.current = edgeFilterMode;
@@ -205,7 +218,7 @@ function App() {
 
     newGraph // Node Events
       .on("node:removed", ({ node }) => {
-        if (inEdit.current) return;
+        if (inEdit.current || suppressingNodeRemoveRef.current) return;
         updateActiveScene(prev => {
           if (prev.root === node.id) {
             prev.root = null;
@@ -237,19 +250,117 @@ function App() {
         presentationCacheRef.current = null;
         queueMicrotask(() => rebuildGraphPresentationRef.current?.());
       })
-      // Edge Events
-      .on("edge:contextmenu", ({ e, x, y, edge, view }) => {
-        e.stopPropagation();
-        edge.remove();
-        setEdited(true);
-        presentationCacheRef.current = null;
-        queueMicrotask(() => rebuildGraphPresentationRef.current?.());
+      .on("edge:dblclick", ({ edge }) => {
+        const via = edge.getData?.()?.viaStageId;
+        if (!via) return;
+        const scene = activeSceneRef.current;
+        const stage = scene?.stages?.find((s) => s.id === via);
+        if (!stage || !scene) return;
+        invoke('open_stage_editor', { activeScene: scene, stage });
       })
-      .on("edge:connected", (e) => {
-        if (inEdit.current) return;
+      .on("edge:contextmenu", ({ e, edge }) => {
+        e.stopPropagation();
+        const via = edge.getData?.()?.viaStageId;
+        const viaName = edge.getData?.()?.viaName;
+        confirm({
+          title: via ? 'Remove transition connection?' : 'Remove connection?',
+          content: via
+            ? `This link goes through "${viaName || via}". Remove the connection?`
+            : 'Delete this edge between poses?',
+          okText: 'Remove',
+          cancelText: 'Cancel',
+          onOk() {
+            edge.remove();
+            setEdited(true);
+            if (via && activeSceneRef.current) {
+              confirm({
+                title: 'Remove transition stage?',
+                content: `Also delete transition "${viaName || via}" from the scene?`,
+                okText: 'Delete transition',
+                cancelText: 'Keep stage',
+                onOk() {
+                  updateActiveScene((prev) => {
+                    prev.stages = (prev.stages || []).filter((s) => s.id !== via);
+                  });
+                  const g = fullGraphRef.current || {};
+                  delete g[via];
+                  for (const id of Object.keys(g)) {
+                    g[id].dest = (g[id].dest || []).filter((d) => d !== via);
+                  }
+                  fullGraphRef.current = g;
+                  presentationCacheRef.current = null;
+                  queueMicrotask(() => rebuildGraphPresentationRef.current?.());
+                },
+                onCancel() {
+                  presentationCacheRef.current = null;
+                  queueMicrotask(() => rebuildGraphPresentationRef.current?.());
+                },
+              });
+            } else {
+              presentationCacheRef.current = null;
+              queueMicrotask(() => rebuildGraphPresentationRef.current?.());
+            }
+          },
+        });
+      })
+      .on("edge:connected", ({ edge }) => {
+        if (inEdit.current || insertingTransitionRef.current) return;
         setEdited(true);
-        presentationCacheRef.current = null;
-        queueMicrotask(() => rebuildGraphPresentationRef.current?.());
+        if (showTransitionsRef.current) {
+          presentationCacheRef.current = null;
+          queueMicrotask(() => rebuildGraphPresentationRef.current?.());
+          return;
+        }
+        const source = edge.getSourceCellId();
+        const target = edge.getTargetCellId();
+        confirm({
+          title: 'Insert transition stage?',
+          content:
+            'Create a fixed-length transition between these poses (OStim-style), or keep a direct link?',
+          okText: 'Insert transition',
+          cancelText: 'Direct link',
+          onOk() {
+            insertingTransitionRef.current = true;
+            const scene = activeSceneRef.current;
+            if (!scene || !source || !target) {
+              insertingTransitionRef.current = false;
+              return;
+            }
+            const id = Math.random().toString(36).slice(2, 10);
+            const tgtName =
+              scene.stages?.find((s) => s.id === target)?.name || 'Pose';
+            const short = shortTransitionLabel(tgtName);
+            const newStage = {
+              id,
+              name: `Go to ${short}`,
+              positions: JSON.parse(
+                JSON.stringify(
+                  scene.stages?.find((s) => s.id === source)?.positions || []
+                )
+              ),
+              tags: ['transition'],
+              extra: { fixed_len: 1, nav_text: '', sound: '' },
+            };
+            updateActiveScene((prev) => {
+              prev.stages = [...(prev.stages || []), newStage];
+            });
+            edge.setData({ viaStageId: id, viaName: newStage.name });
+            edge.setLabels([
+              {
+                attrs: {
+                  label: { text: shortTransitionLabel(newStage.name), fontSize: 11 },
+                },
+              },
+            ]);
+            insertingTransitionRef.current = false;
+            presentationCacheRef.current = null;
+            queueMicrotask(() => rebuildGraphPresentationRef.current?.());
+          },
+          onCancel() {
+            presentationCacheRef.current = null;
+            queueMicrotask(() => rebuildGraphPresentationRef.current?.());
+          },
+        });
       })
       // Custom Events
       .on("node:doMarkRoot", ({ node }) => {
@@ -625,6 +736,7 @@ function App() {
     const stacked = graphCoordsStacked(sceneGraph);
     // Browse defaults to forest arrange when coords are stacked or scene is large.
     const shouldArrange = stacked || large;
+    const collapseTransitions = !showTransitionsRef.current;
     const presentation = computeGraphPresentation({
       sceneGraph,
       rootId: newscene.root,
@@ -638,6 +750,7 @@ function App() {
       useForestLayout: true,
       stages: newscene.stages || [],
       buildRows: false,
+      collapseTransitions,
       existingPositions: shouldArrange
         ? null
         : new Map(
@@ -648,6 +761,8 @@ function App() {
           ),
     });
 
+    fullGraphRef.current = structuredClone(sceneGraph);
+
     graphMetaRef.current = {
       families: presentation.families,
       hubReturnCounts: presentation.hubReturnCounts,
@@ -655,21 +770,7 @@ function App() {
       forest: presentation.forest,
     };
     presentationCacheRef.current = {
-      signature: presentation.signature || sceneGraphSignature(
-        Object.fromEntries(
-          graphIds.map((id) => {
-            const pos = presentation.positions?.get(id) || sceneGraph[id] || {};
-            return [
-              id,
-              {
-                dest: sceneGraph[id]?.dest || [],
-                x: pos.x,
-                y: pos.y,
-              },
-            ];
-          })
-        )
-      ),
+      signature: presentation.signature,
       forest: presentation.forest,
       allEdges: presentation.allEdges,
       ranks: presentation.ranks,
@@ -678,15 +779,22 @@ function App() {
     };
     setNavOutline(presentation.outline || []);
 
-    for (const [key, { x, y }] of Object.entries(sceneGraph)) {
+    const visibleIds = presentation.visibleIds || graphIds;
+    for (const key of visibleIds) {
       const stage = newscene.stages.find((s) => s.id === key);
       if (!stage) {
         console.warn('Graph references missing stage', key, newscene);
         continue;
       }
-      const pos = presentation.positions?.get(key) || { x, y };
+      const pos = presentation.positions?.get(key) || sceneGraph[key] || { x: 40, y: 40 };
       const node = addStageToGraph(stage, pos.x, pos.y);
       updateNodeProps(stage, node, newscene);
+      const size = presentation.nodeSizes?.get(key);
+      applyNodeSlots(node, {
+        inCount: presentation.inCount?.get(key) || 1,
+        outCount: presentation.outCount?.get(key) || 1,
+        isTransition: !!size?.isTransition,
+      });
       node.prop('poseFamily', presentation.families?.get(key) || '');
       node.prop(
         'hubReturns',
@@ -700,24 +808,10 @@ function App() {
         p,
       ])
     );
-    for (const [sourceid, { dest }] of Object.entries(sceneGraph)) {
-      if (!dest.length) continue;
-      if (!nodes.find((node) => node.id === sourceid)) continue;
-      dest.forEach((targetid) => {
-        if (!nodes.find((node) => node.id === targetid)) return;
-        const plan = planByPair.get(`${sourceid}\0${targetid}`);
-        if (plan) {
-          graph.addEdge(planToEdgeConfig(plan));
-        } else {
-          graph.addEdge({
-            shape: STAGE_EDGE_SHAPEID,
-            source: { cell: sourceid, port: 'out' },
-            target: { cell: targetid, port: 'in' },
-            ...STAGE_EDGE,
-            attrs: forwardEdgeAttrs(isDark),
-          });
-        }
-      });
+    for (const plan of presentation.allEdges || []) {
+      if (!nodes.find((node) => node.id === plan.source)) continue;
+      if (!nodes.find((node) => node.id === plan.target)) continue;
+      graph.addEdge(planToEdgeConfig(plan));
     }
     applyEdgeVisibility(graph, presentation.visibleKeys);
     setEdited(false);
@@ -753,24 +847,32 @@ function App() {
 
   const gridSize = 260;
 
-  const buildLiveSceneGraph = () => {
-    const sceneGraph = {};
-    const nodes = graph.getNodes();
-    nodes.forEach((n) => {
-      const edges = graph.getOutgoingEdges(n) || [];
-      sceneGraph[n.id] = {
-        dest: edges.map((e) => e.getTargetCellId()).filter(Boolean),
-        x: n.getPosition().x,
-        y: n.getPosition().y,
-      };
+  const syncStoredGraphFromCanvas = () => {
+    if (!graph || !activeSceneRef.current) return fullGraphRef.current || {};
+    const nodes = graph.getNodes().map((n) => {
+      const p = n.getPosition();
+      return { id: n.id, x: p.x, y: p.y };
     });
-    return sceneGraph;
+    const edges = graph.getEdges().map((e) => ({
+      source: e.getSourceCellId(),
+      target: e.getTargetCellId(),
+      viaStageId: e.getData?.()?.viaStageId || null,
+    }));
+    const next = expandCanvasToStoredGraph({
+      stages: activeSceneRef.current.stages || [],
+      prevGraph: fullGraphRef.current || activeSceneRef.current.graph || {},
+      nodes,
+      edges,
+    });
+    fullGraphRef.current = next;
+    return next;
   };
 
-  /** Cheap path: visibility + dim only (no re-rank / re-route). */
+  const buildLiveSceneGraph = () => syncStoredGraphFromCanvas();
+
   const refreshGraphEdgeVisibility = () => {
     if (!graph || !activeScene) return;
-    const sceneGraph = buildLiveSceneGraph();
+    const sceneGraph = fullGraphRef.current || syncStoredGraphFromCanvas();
     const graphIds = Object.keys(sceneGraph);
     const sig = sceneGraphSignature(sceneGraph);
     const cache = presentationCacheRef.current;
@@ -781,8 +883,8 @@ function App() {
     }
 
     const { visibleKeys, families } = resolveVisibleKeys({
-      sceneGraph,
-      nodeIds: graphIds,
+      sceneGraph: cache.viewGraph || sceneGraph,
+      nodeIds: cache.visibleIds || graphIds,
       edgeMode: edgeFilterModeRef.current,
       focusNodeIds: focusNodeIdsRef.current,
       familyFilter: mapFamilyFilterRef.current,
@@ -808,17 +910,11 @@ function App() {
     rootId = null,
   } = {}) => {
     if (!graph || !activeScene) return;
-    const sceneGraph = buildLiveSceneGraph();
+    const sceneGraph = syncStoredGraphFromCanvas();
     const graphIds = Object.keys(sceneGraph);
     if (!graphIds.length) return;
     const getName = (id) =>
       activeScene.stages?.find((s) => s.id === id)?.name || id;
-    const positions = new Map(
-      graphIds.map((id) => [
-        id,
-        { x: sceneGraph[id].x, y: sceneGraph[id].y },
-      ])
-    );
     const browse = graphWorkModeRef.current === 'browse';
     const startId =
       rootId ||
@@ -832,15 +928,77 @@ function App() {
       isDark,
       edgeMode:
         edgeFilterModeRef.current ||
-        (browse ? 'primary' : 'neighborhood'),
+        (browse ? 'primary' : 'all'),
       focusNodeIds: focusNodeIdsRef.current,
       preferCluster: false,
       rearrange,
       useForestLayout: true,
       stages: activeScene.stages || [],
       buildRows: false,
-      existingPositions: rearrange ? null : positions,
+      collapseTransitions: !showTransitionsRef.current,
+      existingPositions: rearrange
+        ? null
+        : new Map(
+            graph.getNodes().map((n) => {
+              const p = n.getPosition();
+              return [n.id, { x: p.x, y: p.y }];
+            })
+          ),
     });
+
+    const wantIds = new Set(presentation.visibleIds || []);
+    suppressingNodeRemoveRef.current = true;
+    graph.getNodes().forEach((n) => {
+      if (!wantIds.has(n.id)) n.remove();
+    });
+    suppressingNodeRemoveRef.current = false;
+    for (const id of wantIds) {
+      const stage = activeScene.stages?.find((s) => s.id === id);
+      if (!stage) continue;
+      let node = graph.getCellById(id);
+      const pos = presentation.positions?.get(id) || {
+        x: sceneGraph[id]?.x || 40,
+        y: sceneGraph[id]?.y || 40,
+      };
+      if (!node) {
+        node = addStageToGraph(stage, pos.x, pos.y);
+      } else if (rearrange) {
+        node.setPosition(pos.x, pos.y);
+      }
+      updateNodeProps(stage, node, activeScene);
+      const size = presentation.nodeSizes?.get(id);
+      applyNodeSlots(node, {
+        inCount: presentation.inCount?.get(id) || 1,
+        outCount: presentation.outCount?.get(id) || 1,
+        isTransition: !!size?.isTransition,
+      });
+      node.prop('poseFamily', presentation.families?.get(id) || '');
+      node.prop(
+        'hubReturns',
+        presentation.hubReturnCounts?.get(id) || 0
+      );
+    }
+
+    const planByPair = new Map(
+      (presentation.allEdges || []).map((p) => [`${p.source}\0${p.target}`, p])
+    );
+    const wantedEdgeKeys = new Set(planByPair.keys());
+    graph.getEdges().forEach((edge) => {
+      const s = edge.getSourceCellId();
+      const t = edge.getTargetCellId();
+      const key = `${s}\0${t}`;
+      const plan = planByPair.get(key);
+      if (!plan) {
+        edge.remove();
+        return;
+      }
+      applyEdgePlan(edge, plan);
+      wantedEdgeKeys.delete(key);
+    });
+    for (const key of wantedEdgeKeys) {
+      const plan = planByPair.get(key);
+      if (plan) graph.addEdge(planToEdgeConfig(plan));
+    }
 
     graphMetaRef.current = {
       families: presentation.families,
@@ -848,62 +1006,24 @@ function App() {
       clusters: presentation.clusters,
       forest: presentation.forest,
     };
-    setNavOutline(presentation.outline || []);
-
-    if (rearrange) {
-      for (const [id, pos] of presentation.positions) {
-        const node = graph.getCellById(id);
-        if (node) {
-          node.setPosition(pos.x, pos.y);
-          node.prop('poseFamily', presentation.families?.get(id) || '');
-          node.prop(
-            'hubReturns',
-            presentation.hubReturnCounts?.get(id) || 0
-          );
-        }
-      }
-    }
-
-    const planByPair = new Map(
-      (presentation.allEdges || []).map((p) => [`${p.source}\0${p.target}`, p])
-    );
-    graph.getEdges().forEach((edge) => {
-      const s = edge.getSourceCellId();
-      const t = edge.getTargetCellId();
-      const plan = planByPair.get(`${s}\0${t}`);
-      if (!plan) return;
-      const changed = applyEdgePlan(edge, plan);
-      if (changed) {
-        const edgeView = graph.findViewByCell(edge);
-        if (edgeView) edgeView.update();
-      }
-    });
-
-    const liveAfter = rearrange ? buildLiveSceneGraph() : sceneGraph;
-    const { visibleKeys } = resolveVisibleKeys({
-      sceneGraph: liveAfter,
-      nodeIds: Object.keys(liveAfter),
-      edgeMode: edgeFilterModeRef.current,
-      focusNodeIds: focusNodeIdsRef.current,
-      familyFilter: mapFamilyFilterRef.current,
-      forest: presentation.forest,
-      ranks: presentation.ranks,
-    });
-    applyEdgeVisibility(graph, visibleKeys);
-    applyNodeFamilyDim(
-      graph,
-      presentation.families,
-      mapFamilyFilterRef.current
-    );
-
     presentationCacheRef.current = {
-      signature: sceneGraphSignature(liveAfter),
+      signature: presentation.signature,
       forest: presentation.forest,
       allEdges: presentation.allEdges,
       ranks: presentation.ranks,
       families: presentation.families,
       positions: presentation.positions,
+      viewGraph: presentation.collapse?.poseGraph,
+      visibleIds: presentation.visibleIds,
     };
+    setNavOutline(presentation.outline || []);
+
+    applyEdgeVisibility(graph, presentation.visibleKeys);
+    applyNodeFamilyDim(
+      graph,
+      presentation.families,
+      mapFamilyFilterRef.current
+    );
 
     const focus = focusNodeIdsRef.current?.[0];
     if (focus && presentation.forest?.parent) {
@@ -1184,6 +1304,7 @@ function App() {
     node.prop('fixedLen', stage.extra.fixed_len);
     node.prop('isStart', belongingScene && belongingScene.root === stage.id);
     node.prop('isOrgasm', isOrgasm);
+    node.prop('isTransition', isTransitionStage(stage));
   }
 
   const saveScene = () => {
@@ -1232,21 +1353,7 @@ function App() {
     // });
     const scene = {
       ...activeScene,
-      graph: function () {
-        const nodes = graph.getNodes();
-        let ret = {};
-        nodes.forEach(node => {
-          const position = node.getPosition();
-          const edges = graph.getOutgoingEdges(node);
-          const value = edges ? edges.map(e => e.getTargetCellId()) : [];
-          ret[node.id] = {
-            dest: value,
-            x: position.x,
-            y: position.y,
-          };
-        });
-        return ret;
-      }(),
+      graph: syncStoredGraphFromCanvas(),
       has_warnings,
     };
     invoke('save_scene', { scene }).then(() => {
@@ -1690,6 +1797,31 @@ function App() {
                                     disabled={!layoutSnapshotRef.current}
                                     onClick={() => restorePackedPositions()}
                                   />
+                                </Tooltip>
+                                <Divider type="vertical" />
+                                <Tooltip
+                                  title="Show transition stages as nodes (off = collapse into edge labels)"
+                                  mouseEnterDelay={0.5}
+                                >
+                                  <Space size={4}>
+                                    <Typography.Text style={{ fontSize: 12 }}>
+                                      Transitions
+                                    </Typography.Text>
+                                    <Switch
+                                      size="small"
+                                      checked={showTransitions}
+                                      onChange={(v) => {
+                                        setShowTransitions(v);
+                                        showTransitionsRef.current = v;
+                                        presentationCacheRef.current = null;
+                                        queueMicrotask(() => {
+                                          rebuildGraphPresentation({
+                                            rearrange: false,
+                                          });
+                                        });
+                                      }}
+                                    />
+                                  </Space>
                                 </Tooltip>
                                 <Divider type="vertical" />
                                 <Segmented

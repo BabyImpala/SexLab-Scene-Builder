@@ -32,6 +32,41 @@ export function backEdgeAttrs(isDark = false) {
   };
 }
 
+export function viaEdgeAttrs(isDark = false) {
+  return {
+    line: {
+      stroke: isDark ? '#a78bfa' : '#6d28d9',
+      strokeWidth: 1.75,
+      strokeDasharray: '6 4',
+      targetMarker: { ...EDGE_MARKER },
+    },
+  };
+}
+
+export function edgeLabelConfig(text, isDark = false) {
+  if (!text) return [];
+  return [
+    {
+      attrs: {
+        label: {
+          text: String(text).slice(0, 28),
+          fill: isDark ? '#d4d4d8' : '#3f3f46',
+          fontSize: 11,
+          fontFamily: 'Segoe UI, sans-serif',
+        },
+        rect: {
+          fill: isDark ? '#27272a' : '#fafafa',
+          stroke: isDark ? '#52525b' : '#d4d4d8',
+          strokeWidth: 1,
+          rx: 3,
+          ry: 3,
+        },
+      },
+      position: 0.5,
+    },
+  ];
+}
+
 export const STAGE_EDGE = {
   router: {
     name: 'orth',

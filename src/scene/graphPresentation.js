@@ -2,6 +2,7 @@ import {
   layoutSceneGraph,
   routeEdgesForPositions,
   filterEdgePlans,
+  buildNodeSizes,
 } from './graphLayout';
 import {
   layoutFamilyClusters,
@@ -9,10 +10,20 @@ import {
   buildConnectionRows,
   shouldUseClusterLayout,
 } from './graphLayoutClusters';
-import { buildFamilyMap } from './stageFamily';
+import { buildFamilyMap, isTransitionStage } from './stageFamily';
 import { buildSpanningForest, layoutFromForest } from './spanningForest';
 import { primaryEdgeKeys } from './edgeRanker';
-import './layoutPolicy.js'; // documents SLSB-vs-OStim coordinate rules
+import {
+  buildCollapseProjection,
+  degreeMaps,
+  shortTransitionLabel,
+} from './transitionCollapse';
+import {
+  viaEdgeAttrs,
+  edgeLabelConfig,
+  forwardEdgeAttrs,
+} from './SceneEdge';
+import './layoutPolicy.js';
 
 /**
  * Compact signature of topology + positions. Used to invalidate presentation cache.
@@ -102,12 +113,7 @@ export function applyNodeFamilyDim(graph, families, familyFilter) {
 
 /**
  * Compute positions + edge plans for the scene graph, with optional
- * family clustering, spanning-forest browse layout, and edge visibility.
- *
- * Always returns `allEdges` (full routing). `edges` is the visible subset.
- * Keep all edges on the X6 graph and toggle visibility so saves stay complete.
- *
- * Layout coordinates are editor/SLSB-only — never written into OStim scene JSON.
+ * transition collapse, family clustering, spanning-forest layout.
  */
 export function computeGraphPresentation({
   sceneGraph,
@@ -123,14 +129,24 @@ export function computeGraphPresentation({
   stages = [],
   useForestLayout = true,
   buildRows = false,
+  collapseTransitions = true,
 } = {}) {
-  const ids = nodeIds?.length ? nodeIds : Object.keys(sceneGraph || {});
   const nameOf = getName || ((id) => id);
+  const fullIds = nodeIds?.length ? nodeIds : Object.keys(sceneGraph || {});
+
+  const collapse = buildCollapseProjection(sceneGraph, {
+    stages,
+    getName: nameOf,
+    enabled: !!collapseTransitions,
+  });
+
+  const viewGraph = collapse.poseGraph;
+  const ids = collapse.visibleIds;
   const useCluster =
     preferCluster == null ? shouldUseClusterLayout(ids.length) : !!preferCluster;
   const filterMode = edgeMode ?? (useCluster ? 'neighborhood' : 'all');
 
-  const forest = buildSpanningForest(sceneGraph, rootId, ids, {
+  const forest = buildSpanningForest(viewGraph, rootId, ids, {
     getName: nameOf,
     stages,
   });
@@ -151,7 +167,7 @@ export function computeGraphPresentation({
     });
     families = forest.families;
   } else if (rearrange && useCluster) {
-    const clustered = layoutFamilyClusters(sceneGraph, rootId, ids, {
+    const clustered = layoutFamilyClusters(viewGraph, rootId, ids, {
       getName: nameOf,
     });
     positions = clustered.positions;
@@ -162,7 +178,7 @@ export function computeGraphPresentation({
     const treeGraph = {};
     for (const id of ids) {
       treeGraph[id] = {
-        dest: (sceneGraph[id]?.dest || []).filter((t) =>
+        dest: (viewGraph[id]?.dest || []).filter((t) =>
           forest.treeKeys.has(`${id}\0${t}`)
         ),
         x: 0,
@@ -179,12 +195,12 @@ export function computeGraphPresentation({
       existingPositions ||
       new Map(
         ids.map((id) => {
-          const g = sceneGraph[id] || {};
+          const g = viewGraph[id] || sceneGraph[id] || {};
           return [id, { x: Number(g.x) || 40, y: Number(g.y) || 40 }];
         })
       );
     if (useCluster) {
-      const clustered = layoutFamilyClusters(sceneGraph, rootId, ids, {
+      const clustered = layoutFamilyClusters(viewGraph, rootId, ids, {
         getName: nameOf,
       });
       families = clustered.families;
@@ -195,23 +211,78 @@ export function computeGraphPresentation({
     }
   }
 
-  const routed = routeEdgesForPositions(sceneGraph, rootId, ids, positions, {
+  const { inCount, outCount } = degreeMaps(viewGraph);
+  const stageById = new Map((stages || []).map((s) => [s.id, s]));
+  const nodeSizes = buildNodeSizes(ids, inCount, outCount, (id) =>
+    isTransitionStage(stageById.get(id) || nameOf(id))
+  );
+
+  const routed = routeEdgesForPositions(viewGraph, rootId, ids, positions, {
     isDark,
+    nodeSizes,
+    getName: nameOf,
   });
+
+  const viaByKey = new Map(
+    collapse.poseEdges
+      .filter((e) => e.viaStageId)
+      .map((e) => [`${e.source}\0${e.target}`, e])
+  );
+
   const allEdges = (seededEdges || routed.edges).map((plan) => {
     const key = `${plan.source}\0${plan.target}`;
     const info = forest.edgeInfo.get(key);
-    return {
+    const via = viaByKey.get(key);
+    const base = {
       ...plan,
       semanticRank: info?.rank || 'secondary',
       semanticScore: info?.score ?? 0,
       inTree: forest.treeKeys.has(key),
+      viaStageId: via?.viaStageId || null,
+      viaName: via?.viaName || null,
     };
+    if (via?.viaStageId) {
+      const label = shortTransitionLabel(via.viaName || via.viaStageId);
+      return {
+        ...base,
+        attrs: viaEdgeAttrs(isDark),
+        labels: edgeLabelConfig(label, isDark),
+        kind: plan.kind === 'back' ? 'back' : 'via',
+      };
+    }
+    return base;
   });
+
+  const plannedKeys = new Set(allEdges.map((e) => `${e.source}\0${e.target}`));
+  for (const pe of collapse.poseEdges) {
+    const key = `${pe.source}\0${pe.target}`;
+    if (plannedKeys.has(key)) continue;
+    const via = pe.viaStageId;
+    allEdges.push({
+      source: pe.source,
+      target: pe.target,
+      kind: via ? 'via' : 'forward',
+      sourcePort: 'out0',
+      targetPort: 'in0',
+      router: { name: 'normal' },
+      connector: { name: 'rounded', args: { radius: 20 } },
+      vertices: [],
+      attrs: via ? viaEdgeAttrs(isDark) : forwardEdgeAttrs(isDark),
+      labels: via
+        ? edgeLabelConfig(shortTransitionLabel(pe.viaName), isDark)
+        : [],
+      viaStageId: pe.viaStageId,
+      viaName: pe.viaName,
+      semanticRank: 'secondary',
+      semanticScore: 0,
+      inTree: false,
+    });
+  }
+
   const ranks = seededRanks || routed.ranks;
 
   const { visibleKeys } = resolveVisibleKeys({
-    sceneGraph,
+    sceneGraph: viewGraph,
     nodeIds: ids,
     edgeMode: filterMode,
     focusNodeIds,
@@ -220,7 +291,7 @@ export function computeGraphPresentation({
   });
 
   const connectionRows = buildRows
-    ? buildConnectionRows(sceneGraph, ids, {
+    ? buildConnectionRows(viewGraph, ids, {
         getName: nameOf,
         families,
         ranks,
@@ -246,6 +317,13 @@ export function computeGraphPresentation({
     treeKeys: forest.treeKeys,
     primaryKeys: primaryEdgeKeys(forest.edgeInfo),
     signature: sceneGraphSignature(sceneGraph),
+    collapse,
+    visibleIds: ids,
+    hiddenIds: collapse.hiddenIds,
+    inCount,
+    outCount,
+    nodeSizes,
+    collapseTransitions: !!collapseTransitions,
   };
 }
 
