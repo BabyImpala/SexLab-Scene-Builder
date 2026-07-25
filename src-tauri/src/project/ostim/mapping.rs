@@ -13,13 +13,23 @@ pub fn ostim_furniture_to_slsb(furniture: &str) -> (Vec<String>, bool) {
         "bedroll" => (vec!["BedRoll"], true),
         "wall" => (vec!["Wall"], false),
         "table" => (vec!["Table"], false),
-        "tableleanmarker" | "tableleanmarkerbbls" => (vec!["Table", "TableCounter"], false),
-        "bench" => (vec!["Bench", "BenchMisc"], false),
-        "chair" => (vec!["Chair", "ChairCommon", "ChairMisc"], false),
-        "shelf" | "wardrobe" | "wardrobethick" | "wardrobethin" => (vec!["Railing"], false),
+        "tableleanmarker" | "tableleanmarkerbbls" | "counter" | "tablecounter" => {
+            (vec!["Table", "TableCounter"], false)
+        }
+        "bench" | "couch" | "sofa" => (vec!["Bench", "BenchMisc"], false),
+        "chair" | "stool" => (vec!["Chair", "ChairCommon", "ChairMisc"], false),
+        "shelf" | "wardrobe" | "wardrobethick" | "wardrobethin" | "railing" => {
+            (vec!["Railing"], false)
+        }
         "cookingpot" => (vec!["CraftCookingPot"], false),
         "alchemytable" => (vec!["CraftAlchemy"], false),
         "enchantingtable" => (vec!["CraftEnchanting"], false),
+        "throne" => (vec!["Throne", "ThroneNordic"], false),
+        "xcross" | "cross" => (vec!["XCross"], false),
+        unknown if !unknown.is_empty() && unknown != "none" => {
+            // Keep ostim_type on the scene; SexLab gets None until mapped.
+            (vec!["None"], false)
+        }
         _ => (vec!["None"], false),
     };
     (
@@ -136,15 +146,46 @@ pub fn tag_to_action(tag: &str) -> Option<&'static str> {
     }
 }
 
-/// Build OStim `actions` from SLSB scene/stage tags.
+/// Build OStim `actions` from SLSB scene/stage tags (prefers `action:type:a:t:p`).
 pub fn tags_to_actions(tags: &[String], actor_count: usize) -> Vec<serde_json::Value> {
     let mut seen = std::collections::HashSet::new();
     let mut actions = Vec::new();
     for tag in tags {
+        if let Some(rest) = tag.strip_prefix("action:") {
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.is_empty() || parts[0].is_empty() {
+                continue;
+            }
+            let action_type = parts[0];
+            if !seen.insert(action_type.to_string()) {
+                continue;
+            }
+            let (actor, target, performer) = if parts.len() >= 4 {
+                (
+                    parts[1].parse().unwrap_or(0),
+                    parts[2].parse().unwrap_or(0),
+                    parts[3].parse().unwrap_or(0),
+                )
+            } else {
+                default_action_roles(action_type, actor_count)
+            };
+            let mut obj = serde_json::json!({
+                "type": action_type,
+                "actor": actor,
+            });
+            if target != actor {
+                obj["target"] = serde_json::json!(target);
+            }
+            if performer != actor {
+                obj["performer"] = serde_json::json!(performer);
+            }
+            actions.push(obj);
+            continue;
+        }
         let Some(action_type) = tag_to_action(tag) else {
             continue;
         };
-        if !seen.insert(action_type) {
+        if !seen.insert(action_type.to_string()) {
             continue;
         }
         let (actor, target, performer) = default_action_roles(action_type, actor_count);
@@ -161,6 +202,60 @@ pub fn tags_to_actions(tags: &[String], actor_count: usize) -> Vec<serde_json::V
         actions.push(obj);
     }
     actions
+}
+
+/// Infer SexLab race key from OStim actor / scene hints.
+pub fn infer_race_key(actor: &serde_json::Value, scene_tags: &[String]) -> String {
+    for key in ["race", "raceKey", "racekey"] {
+        if let Some(r) = actor.get(key).and_then(|v| v.as_str()) {
+            let mapped = normalize_race_hint(r);
+            if !mapped.is_empty() {
+                return mapped;
+            }
+        }
+    }
+    let mut hints: Vec<String> = actor
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    hints.extend(scene_tags.iter().cloned());
+    for hint in &hints {
+        let mapped = normalize_race_hint(hint);
+        if mapped != "Human" && !mapped.is_empty() {
+            return mapped;
+        }
+    }
+    "Human".into()
+}
+
+fn normalize_race_hint(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "human" | "humans" | "npc" => "Human".into(),
+        "wolf" | "wolves" => "Wolf".into(),
+        "dog" | "dogs" | "canine" => "Dog".into(),
+        "horse" | "horses" => "Horse".into(),
+        "draugr" => "Draugr".into(),
+        "falmer" => "Falmer".into(),
+        "spider" | "frostbitespider" => "Spider".into(),
+        "chaurus" => "Chaurus".into(),
+        "bear" => "Bear".into(),
+        "troll" => "Troll".into(),
+        "giant" => "Giant".into(),
+        _ => {
+            // Accept already-canonical SexLab race keys case-insensitively.
+            for key in crate::racekeys::get_race_keys_string() {
+                if key.eq_ignore_ascii_case(raw.trim()) {
+                    return key;
+                }
+            }
+            "Human".into()
+        }
+    }
 }
 
 fn default_action_roles(action_type: &str, actor_count: usize) -> (usize, usize, usize) {
@@ -197,7 +292,22 @@ mod tests {
     fn action_tag_bridge() {
         assert!(action_to_tags("vaginalsex").contains(&"Vaginal"));
         assert_eq!(tag_to_action("Vaginal"), Some("vaginalsex"));
-        let actions = tags_to_actions(&["Vaginal".into(), "Blowjob".into()], 2);
+        let actions = tags_to_actions(
+            &["action:vaginalsex:0:1:1".into(), "Blowjob".into()],
+            2,
+        );
         assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0]["type"], "vaginalsex");
+        assert_eq!(actions[0]["actor"], 0);
+        assert_eq!(actions[0]["target"], 1);
+        assert_eq!(actions[0]["performer"], 1);
+    }
+
+    #[test]
+    fn race_inference() {
+        let actor = serde_json::json!({ "tags": ["wolf"] });
+        assert_eq!(infer_race_key(&actor, &[]), "Wolf");
+        let human = serde_json::json!({ "intendedSex": "female" });
+        assert_eq!(infer_race_key(&human, &[]), "Human");
     }
 }

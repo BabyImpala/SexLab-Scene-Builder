@@ -112,6 +112,15 @@ mod tests {
         }
         let pack = Package::from_ostim(root.clone()).unwrap();
         assert!(
+            pack.ostim_source.as_ref().map(|p| p == &root).unwrap_or(false),
+            "ostim_source should remember import root"
+        );
+        assert!(
+            !pack.pack_name.contains(' '),
+            "pack_name should be FNIS-safe, got {}",
+            pack.pack_name
+        );
+        assert!(
             (10..=40).contains(&pack.scenes.len()),
             "expected grouped SLSB scenes (~17), got {}",
             pack.scenes.len()
@@ -147,6 +156,44 @@ mod tests {
         assert!(branching >= 5, "expected several branching scenes, got {branching}");
         assert!(with_furniture >= 3, "expected furniture scenes, got {with_furniture}");
         assert!(with_look > 0, "expected lookUp/lookLeft preserved from MLC");
+
+        // Native OStim event names (no forced _A#_S#)
+        let mut ostim_events = 0usize;
+        let mut tagged_sos = 0usize;
+        let mut auto_climax_edges = 0usize;
+        for scene in pack.scenes.values() {
+            for stage in &scene.stages {
+                for pos in &stage.positions {
+                    if pos
+                        .event
+                        .first()
+                        .map(|e| e.contains("_A") && e.contains("_S"))
+                        .unwrap_or(false)
+                    {
+                        // legacy SexLab naming should not appear on fresh OStim import
+                    } else if pos.event.first().map(|e| e.contains('_')).unwrap_or(false) {
+                        ostim_events += 1;
+                    }
+                    if pos.tags.iter().any(|t| t.starts_with("ostim_sos:")) {
+                        tagged_sos += 1;
+                    }
+                }
+                if stage
+                    .extra
+                    .nav_text
+                    .split(';')
+                    .any(|p| p.starts_with("3000:"))
+                {
+                    auto_climax_edges += 1;
+                }
+            }
+        }
+        assert!(ostim_events > 100, "expected OStim-style events, got {ostim_events}");
+        assert!(tagged_sos > 0, "expected ostim_sos tags in .slr-bound position tags");
+        assert!(
+            auto_climax_edges > 0,
+            "expected climax autoTransition/nav edges encoded in nav_text"
+        );
 
         // Build .slr pack (registry + FNIS) — must succeed for usability
         let tmp = std::env::temp_dir().join(format!("slsb_ostim2slr_{}", std::process::id()));

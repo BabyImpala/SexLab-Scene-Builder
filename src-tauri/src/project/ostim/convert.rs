@@ -21,10 +21,10 @@ use serde_json::Value;
 
 use crate::project::define::{Node, Offset, Sex};
 use crate::project::ostim::events::{
-    derive_anim_base, ostim_to_slsb_event, sanitize_ostim_id, strip_actor_stage_suffix,
+    derive_anim_base, ostim_actor_event, sanitize_ostim_id, animation_base_from_event,
 };
 use crate::project::ostim::mapping::{
-    action_to_tags, ostim_furniture_to_slsb, slsb_furniture_to_ostim, tags_to_actions,
+    action_to_tags, infer_race_key, ostim_furniture_to_slsb, slsb_furniture_to_ostim, tags_to_actions,
 };
 use crate::project::position::Position;
 use crate::project::position_info::PositionInfo;
@@ -41,6 +41,10 @@ pub struct OstimImportSummary {
     /// Of which were transition nodes.
     pub transitions_included: usize,
     pub files_read: usize,
+    /// autoTransitions edges materialized into the stage graph.
+    pub auto_transitions_linked: usize,
+    /// autoTransitions destinations missing from the pack.
+    pub auto_transitions_missing: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -148,7 +152,16 @@ pub fn import_ostim_scenes(
         raw.insert(ostim_id, value);
     }
 
-    let edges = collect_edges(&raw);
+    let mut edges = collect_edges(&raw);
+    let auto_stats = append_auto_transition_edges(&raw, &mut edges);
+    summary.auto_transitions_linked = auto_stats.0;
+    summary.auto_transitions_missing = auto_stats.1;
+    if summary.auto_transitions_missing > 0 {
+        warn!(
+            "OStim import: {} autoTransition destination(s) missing from pack",
+            summary.auto_transitions_missing
+        );
+    }
     let components = connected_components(raw.keys().cloned().collect(), &edges);
     let mut scenes = IndexMap::new();
 
@@ -173,6 +186,7 @@ pub fn import_ostim_scenes(
             .unwrap_or("OStimPack")
             .to_string();
     }
+    pack_name = sanitize_ostim_id(&pack_name, "OStimPack");
 
     Ok((pack_name, String::new(), scenes, summary))
 }
@@ -268,6 +282,73 @@ fn collect_edges(raw: &IndexMap<String, Value>) -> Vec<NavEdge> {
         }
     }
     edges
+}
+
+fn auto_transition_priority(kind: &str) -> i64 {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "climax" | "orgasm" => 3000,
+        _ => 2000,
+    }
+}
+
+fn push_auto_transition_map(
+    from: &str,
+    map: &serde_json::Map<String, Value>,
+    id_set: &HashSet<&str>,
+    edges: &mut Vec<NavEdge>,
+    linked: &mut usize,
+    missing: &mut usize,
+) {
+    for (kind, dest_v) in map {
+        let Some(dest) = dest_v.as_str().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if !id_set.contains(dest) {
+            *missing += 1;
+            warn!(
+                "OStim '{from}': autoTransitions.{kind} → '{dest}' not in pack"
+            );
+            continue;
+        }
+        let already = edges
+            .iter()
+            .any(|e| e.from == from && e.to == dest);
+        if already {
+            continue;
+        }
+        edges.push(NavEdge {
+            from: from.to_string(),
+            to: dest.to_string(),
+            priority: auto_transition_priority(kind),
+            description: kind.clone(),
+            icon: String::new(),
+            border: String::new(),
+        });
+        *linked += 1;
+    }
+}
+
+/// Materialize actor/scene `autoTransitions` into nav edges. Returns (linked, missing).
+fn append_auto_transition_edges(
+    raw: &IndexMap<String, Value>,
+    edges: &mut Vec<NavEdge>,
+) -> (usize, usize) {
+    let id_set: HashSet<&str> = raw.keys().map(|s| s.as_str()).collect();
+    let mut linked = 0usize;
+    let mut missing = 0usize;
+    for (sid, value) in raw {
+        if let Some(map) = value.get("autoTransitions").and_then(|v| v.as_object()) {
+            push_auto_transition_map(sid, map, &id_set, edges, &mut linked, &mut missing);
+        }
+        if let Some(actors) = value.get("actors").and_then(|a| a.as_array()) {
+            for actor in actors {
+                if let Some(map) = actor.get("autoTransitions").and_then(|v| v.as_object()) {
+                    push_auto_transition_map(sid, map, &id_set, edges, &mut linked, &mut missing);
+                }
+            }
+        }
+    }
+    (linked, missing)
 }
 
 fn connected_components(ids: Vec<String>, edges: &[NavEdge]) -> Vec<Vec<String>> {
@@ -373,6 +454,8 @@ fn component_to_scene(
         }
     }
 
+    disambiguate_duplicate_stage_names(&mut stages);
+
     // Root: prefer looping idle, else first looping, else first node
     let root_ostim = pick_root(component, raw);
     scene.root = stage_for_ostim
@@ -415,7 +498,7 @@ fn component_to_scene(
     scene.furniture.furni_types = furni_types;
     scene.furniture.allow_bed = allow_bed;
     if best_furn != "none" {
-        scene.furniture.ostim_type = best_furn;
+        scene.furniture.ostim_type = best_furn.clone();
     }
     if let Some(off) = root_value.and_then(|v| v.get("offset")) {
         scene.furniture.offset = read_offset(off);
@@ -424,6 +507,9 @@ fn component_to_scene(
     // Scene tags: union of looping tags + group marker
     let mut tags = Vec::new();
     tags.push(format!("ostim_group:{index}"));
+    if best_furn != "none" {
+        tags.push(format!("ostim_furniture:{best_furn}"));
+    }
     for id in component {
         let Some(v) = raw.get(id) else { continue };
         if is_transition(v) {
@@ -446,9 +532,18 @@ fn component_to_scene(
                             tags.push(t.to_string());
                         }
                     }
-                    let raw_t = format!("action:{ty}");
-                    if !tags.iter().any(|x| x == &raw_t) {
-                        tags.push(raw_t);
+                    let actor = action.get("actor").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let target = action
+                        .get("target")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(actor);
+                    let performer = action
+                        .get("performer")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(actor);
+                    let full = format!("action:{ty}:{actor}:{target}:{performer}");
+                    if !tags.iter().any(|x| x == &full) {
+                        tags.push(full);
                     }
                 }
             }
@@ -613,11 +708,35 @@ fn ostim_node_to_stage(ostim_id: &str, value: &Value, layout_index: usize) -> Re
                         tags.push(t.to_string());
                     }
                 }
-                let raw = format!("action:{ty}");
-                if !tags.iter().any(|x| x == &raw) {
-                    tags.push(raw);
+                let actor = action.get("actor").and_then(|x| x.as_u64()).unwrap_or(0);
+                let target = action
+                    .get("target")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(actor);
+                let performer = action
+                    .get("performer")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(actor);
+                let full = format!("action:{ty}:{actor}:{target}:{performer}");
+                if !tags.iter().any(|x| x == &full) {
+                    tags.push(full);
                 }
             }
+        }
+    }
+
+    for key in [
+        "fadeOnEntry",
+        "scaleOffsetWithFurniture",
+        "noRandomSelection",
+    ] {
+        if let Some(v) = value.get(key) {
+            let enc = if let Some(b) = v.as_bool() {
+                b.to_string()
+            } else {
+                v.to_string()
+            };
+            tags.push(format!("ostim_{key}:{enc}"));
         }
     }
 
@@ -655,13 +774,22 @@ fn ostim_node_to_stage(ostim_id: &str, value: &Value, layout_index: usize) -> Re
         .and_then(|v| v.as_f64())
         .unwrap_or((default_speed + 1) as f64);
 
+    let scene_tag_hints: Vec<String> = value
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut stage = Stage {
         id: NanoID::new_nanoid(),
         name: format!("{display_name}|pb:{playback}|ds:{display}"),
         positions: Vec::with_capacity(actors.len()),
         tags,
         extra: StageExtra {
-            // Transitions are fixed-length one-shots; looping poses keep length as hint
             fixed_len: if is_transition(value) {
                 fixed_len_ms.max(1.0)
             } else {
@@ -679,24 +807,24 @@ fn ostim_node_to_stage(ostim_id: &str, value: &Value, layout_index: usize) -> Re
             .get("animationIndex")
             .and_then(|v| v.as_u64())
             .unwrap_or(ai as u64) as usize;
-        // Unique S-index per OStim node isn't needed when animation names differ;
-        // use 1 for the default clip of this node.
-        pos.event = vec![ostim_to_slsb_event(animation, anim_index + 1, 1)];
+        pos.event = vec![ostim_actor_event(animation, anim_index)];
         pos.offset = actor.get("offset").map(read_offset).unwrap_or_default();
         if let Some(sos) = actor.get("sosBend").and_then(|v| v.as_i64()) {
             pos.schlong = sos.clamp(i8::MIN as i64, i8::MAX as i64) as i8;
+            pos.tags.push(format!("ostim_sos:{sos}"));
         }
         pos.sex = intended_sex_to_sex(actor.get("intendedSex").and_then(|v| v.as_str()));
-        pos.race = "Human".into();
+        pos.race = infer_race_key(actor, &scene_tag_hints);
         pos.scale = actor
             .get("scale")
             .and_then(|v| v.as_f64())
             .unwrap_or(1.0) as f32;
         if let Some(atags) = actor.get("tags").and_then(|v| v.as_array()) {
-            pos.tags = atags
-                .iter()
-                .filter_map(|t| t.as_str().map(|s| s.to_string()))
-                .collect();
+            for t in atags.iter().filter_map(|t| t.as_str()) {
+                if !pos.tags.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+                    pos.tags.push(t.to_string());
+                }
+            }
         }
         if actor.get("noStrip").and_then(|v| v.as_bool()) == Some(true) {
             pos.strip_data = crate::project::define::Stripping::nothing();
@@ -706,14 +834,21 @@ fn ostim_node_to_stage(ostim_id: &str, value: &Value, layout_index: usize) -> Re
         } else if let Some(v) = actor.get("lookDown").and_then(|v| v.as_i64()) {
             pos.look_up = (-v).clamp(-100, 100) as i32;
         }
+        if pos.look_up != 0 {
+            pos.tags.push(format!("ostim_lookUp:{}", pos.look_up));
+        }
         if let Some(v) = actor.get("lookLeft").and_then(|v| v.as_i64()) {
             pos.look_left = v.clamp(-100, 100) as i32;
         } else if let Some(v) = actor.get("lookRight").and_then(|v| v.as_i64()) {
             pos.look_left = (-v).clamp(-100, 100) as i32;
         }
+        if pos.look_left != 0 {
+            pos.tags.push(format!("ostim_lookLeft:{}", pos.look_left));
+        }
         if let Some(idx) = actor.get("animationIndex").and_then(|v| v.as_u64()) {
             if idx as usize != ai {
                 pos.animation_index = Some(idx as u32);
+                pos.tags.push(format!("ostim_animIndex:{idx}"));
             }
         }
         if let Some(expr) = actor
@@ -721,8 +856,10 @@ fn ostim_node_to_stage(ostim_id: &str, value: &Value, layout_index: usize) -> Re
             .and_then(|v| v.as_str())
         {
             pos.expression_override = expr.to_string();
+            if !expr.is_empty() {
+                pos.tags.push(format!("ostim_expr:{expr}"));
+            }
         }
-        // Equip objects: rare on actors; also accept equipObjects map keys set true
         if let Some(eq) = actor.get("equipObjects").and_then(|v| v.as_object()) {
             let names: Vec<String> = eq
                 .iter()
@@ -731,7 +868,14 @@ fn ostim_node_to_stage(ostim_id: &str, value: &Value, layout_index: usize) -> Re
                 .collect();
             if !names.is_empty() {
                 pos.equip_objects = names.join(" ");
+                pos.anim_obj = names.join(" ");
+                for name in &names {
+                    pos.tags.push(format!("ostim_equip:{name}"));
+                }
             }
+        }
+        if actor.get("feetOnGround").and_then(|v| v.as_bool()) == Some(true) {
+            pos.tags.push("ostim_feetOnGround:true".into());
         }
         stage.positions.push(pos);
     }
@@ -814,6 +958,35 @@ fn stage_ostim_id(stage: &Stage) -> Option<String> {
         .find_map(|t| t.strip_prefix("ostim_id:").map(|s| s.to_string()))
 }
 
+/// OStim often reuses the same display name for different transition clips
+/// (e.g. forward vs reverse). Append destination / id so the graph is readable.
+fn disambiguate_duplicate_stage_names(stages: &mut [Stage]) {
+    let mut indexes_by_name: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, stage) in stages.iter().enumerate() {
+        indexes_by_name
+            .entry(stage.name.clone())
+            .or_default()
+            .push(i);
+    }
+    for idxs in indexes_by_name.values() {
+        if idxs.len() < 2 {
+            continue;
+        }
+        for &i in idxs {
+            let dest = stages[i]
+                .tags
+                .iter()
+                .find_map(|t| t.strip_prefix("ostim_dest:"))
+                .map(|s| s.to_string());
+            let oid = stage_ostim_id(&stages[i]);
+            let suffix = dest.or(oid);
+            if let Some(suf) = suffix {
+                stages[i].name = format!("{} [{}]", stages[i].name, suf);
+            }
+        }
+    }
+}
+
 fn stage_is_transition(stage: &Stage) -> bool {
     stage
         .tags
@@ -892,7 +1065,7 @@ fn stages_share_anim_base(stages: &[&Stage]) -> Option<String> {
             let Some(event) = pos.event.first() else {
                 continue;
             };
-            let Some(id) = strip_actor_stage_suffix(event) else {
+            let Some(id) = animation_base_from_event(event) else {
                 return None;
             };
             match &base {
@@ -950,7 +1123,7 @@ fn export_stages_as_ostim_graph(
                 .positions
                 .first()
                 .and_then(|p| p.event.first())
-                .and_then(|e| strip_actor_stage_suffix(e))
+                .and_then(|e| animation_base_from_event(e))
                 .unwrap_or_else(|| format!("Stage_{}", i + 1));
             sanitize_ostim_id(&base, &stage.id.0)
         });
@@ -958,7 +1131,7 @@ fn export_stages_as_ostim_graph(
             .positions
             .first()
             .and_then(|p| p.event.first())
-            .and_then(|e| strip_actor_stage_suffix(e))
+            .and_then(|e| animation_base_from_event(e))
             .map(|b| sanitize_ostim_id(&b, &sid))
             .unwrap_or_else(|| sid.clone());
         id_for_stage.insert(stage.id.clone(), sid.clone());
@@ -1278,6 +1451,10 @@ fn build_ostim_json(
             !t.starts_with("ostim_id:")
                 && !t.starts_with("ostim_dest:")
                 && !t.starts_with("ostim_speed:")
+                && !t.starts_with("ostim_furniture:")
+                && !t.starts_with("ostim_fadeOnEntry:")
+                && !t.starts_with("ostim_scaleOffsetWithFurniture:")
+                && !t.starts_with("ostim_noRandomSelection:")
                 && !t.starts_with("nav:")
                 && !t.starts_with("action:")
                 && !t.starts_with("ostim_group:")
@@ -1290,20 +1467,14 @@ fn build_ostim_json(
         tags.push("climax".into());
     }
 
-    let mut actions = Vec::new();
-    let mut seen_actions = HashSet::new();
-    for tag in stage_for_actors.tags.iter().chain(scene.tags.iter()) {
-        if let Some(ty) = tag.strip_prefix("action:") {
-            if seen_actions.insert(ty.to_string()) {
-                let built = tags_to_actions(&[ty.to_string()], actors.len());
-                if let Some(a) = built.into_iter().next() {
-                    actions.push(a);
-                } else {
-                    actions.push(serde_json::json!({ "type": ty, "actor": 0 }));
-                }
-            }
-        }
-    }
+    let mut combined_tags: Vec<String> = stage_for_actors
+        .tags
+        .iter()
+        .chain(scene.tags.iter())
+        .cloned()
+        .collect();
+    combined_tags.extend(tags.iter().cloned());
+    let mut actions = tags_to_actions(&combined_tags, actors.len());
     if actions.is_empty() {
         actions = tags_to_actions(&tags, actors.len());
     }
@@ -1363,12 +1534,8 @@ pub fn animations_from_ostim_json(json: &Value) -> Vec<(String, bool)> {
 }
 
 pub fn warn_dropped_ostim_fields(ostim_id: &str, value: &Value) {
-    for key in [
-        "autoTransitions",
-        "fadeOnEntry",
-        "scaleOffsetWithFurniture",
-        "noRandomSelection",
-    ] {
+    // Fields we deliberately leave out of SLSB IR (no safe slot / unused by SexLab++).
+    for key in ["compatScenes", "sourceSound", "hudIcon"] {
         if value.get(key).is_some() {
             warn!("OStim scene '{ostim_id}': field '{key}' not represented in SLSB IR");
         }
@@ -1378,6 +1545,61 @@ pub fn warn_dropped_ostim_fields(ostim_id: &str, value: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_transitions_become_graph_edges() {
+        let mut raw = IndexMap::new();
+        raw.insert(
+            "Sex".into(),
+            serde_json::json!({
+                "name": "Sex", "length": 2,
+                "speeds": [{ "animation": "SexAnim", "playbackSpeed": 1, "displaySpeed": 1 }],
+                "actors": [{
+                    "intendedSex": "male",
+                    "autoTransitions": { "climax": "Climax" }
+                }, { "intendedSex": "female" }],
+                "actions": [],
+                "navigations": []
+            }),
+        );
+        raw.insert(
+            "Climax".into(),
+            serde_json::json!({
+                "name": "Climax", "length": 2,
+                "tags": ["climax"],
+                "speeds": [{ "animation": "ClimaxAnim" }],
+                "actors": [{ "intendedSex": "male" }, { "intendedSex": "female" }],
+                "actions": []
+            }),
+        );
+        let edges = {
+            let mut e = collect_edges(&raw);
+            let _ = append_auto_transition_edges(&raw, &mut e);
+            e
+        };
+        assert!(
+            edges.iter().any(|e| e.from == "Sex" && e.to == "Climax" && e.priority == 3000),
+            "expected climax autoTransition edge: {edges:?}"
+        );
+        let scene = component_to_scene(&["Climax".into(), "Sex".into()], &raw, &edges, 0).unwrap();
+        let sex_stage = scene
+            .stages
+            .iter()
+            .find(|s| s.tags.iter().any(|t| t == "ostim_id:Sex"))
+            .unwrap();
+        let climax_stage = scene
+            .stages
+            .iter()
+            .find(|s| s.tags.iter().any(|t| t == "ostim_id:Climax"))
+            .unwrap();
+        assert!(scene
+            .graph
+            .get(&sex_stage.id)
+            .unwrap()
+            .dest
+            .iter()
+            .any(|d| d == &climax_stage.id));
+    }
 
     #[test]
     fn single_node_still_imports() {
@@ -1405,7 +1627,12 @@ mod tests {
         let scene = ostim_json_to_scene("MLCBedCowgirl", &json).unwrap();
         assert_eq!(scene.stages.len(), 1);
         assert!(scene.stages[0].tags.iter().any(|t| t.starts_with("ostim_speed:")));
-        assert_eq!(scene.stages[0].positions[0].event[0], "MLCBedCowgirl_A1_S1");
+        assert_eq!(scene.stages[0].positions[0].event[0], "MLCBedCowgirl_0");
+        assert!(scene.stages[0].positions[0].tags.iter().any(|t| t == "ostim_sos:6"));
+        assert!(scene.stages[0]
+            .tags
+            .iter()
+            .any(|t| t == "action:vaginalsex:0:1:1"));
     }
 
     #[test]
