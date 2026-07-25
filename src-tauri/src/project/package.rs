@@ -93,6 +93,8 @@ pub struct Package {
 
     pub pack_name: String,
     pub pack_author: String,
+    #[serde(default)]
+    pub pack_version: String,
     pub prefix_hash: NanoID,
     pub scenes: IndexMap<NanoID, Scene>,
 }
@@ -104,6 +106,7 @@ impl Package {
             pack_path: Default::default(),
             pack_name: Default::default(),
             pack_author: Default::default(),
+            pack_version: Default::default(),
             prefix_hash: NanoID::new_prefix(),
             scenes: IndexMap::new(),
         }
@@ -338,7 +341,11 @@ impl Package {
 
         let mut prjct = Package::new();
         prjct.version = 0; // SLAL files are always version 0
-        // pack_name / pack_author stay empty for the user to fill in.
+        // Convert script sets SLAL "name" to the FNIS anim dir (e.g. BPAnims).
+        prjct.pack_name = slal["name"]
+            .as_str()
+            .ok_or("Missing name attribute")?
+            .into();
 
         let anims = slal["animations"]
             .as_array()
@@ -550,7 +557,12 @@ impl Package {
         self.export_as(app, ExportKind::Slsb)
     }
 
-    pub fn export_as(&self, app: &tauri::AppHandle, kind: ExportKind) -> Result<(), String> {
+    /// Pick folder and resolve write roots under `{folder}/{PackName}/`.
+    pub fn pick_export_paths(
+        &self,
+        app: &tauri::AppHandle,
+        kind: ExportKind,
+    ) -> Result<(PathBuf, Vec<PathBuf>), String> {
         let path = app
             .dialog()
             .file()
@@ -559,26 +571,42 @@ impl Package {
                 ExportKind::Slal => "Export SLAL",
                 ExportKind::Both => "Export SLSB + SLAL",
             })
-            .set_file_name(&self.pack_name)
+            .set_file_name(&self.fnis_mod_name())
             .blocking_pick_folder()
             .ok_or_else(|| "Export cancelled".to_string())?
             .into_path()
             .map_err(|e| e.to_string())?;
 
-        match kind {
-            ExportKind::Slsb => self.build(path).map_err(|e| e.to_string()),
-            ExportKind::Slal => self.write_slal_pack(&path),
+        let pack_root = path.join(self.fnis_mod_name());
+        let write_roots = match kind {
+            ExportKind::Slsb | ExportKind::Slal => vec![pack_root.clone()],
             ExportKind::Both => {
                 // SLSB and SLAL FNIS list formats clash in the same tree
-                self.build(path.join("SLSB")).map_err(|e| e.to_string())?;
-                self.write_slal_pack(&path.join("SLAL"))
+                vec![pack_root.join("SLSB"), pack_root.join("SLAL")]
+            }
+        };
+        Ok((pack_root, write_roots))
+    }
+
+    pub fn export_as(&self, app: &tauri::AppHandle, kind: ExportKind) -> Result<(), String> {
+        let (pack_root, _) = self.pick_export_paths(app, kind)?;
+        self.export_into(&pack_root, kind)
+    }
+
+    pub fn export_into(&self, pack_root: &Path, kind: ExportKind) -> Result<(), String> {
+        match kind {
+            ExportKind::Slsb => self.build(pack_root.to_path_buf()).map_err(|e| e.to_string()),
+            ExportKind::Slal => self.write_slal_pack(&pack_root.to_path_buf()),
+            ExportKind::Both => {
+                self.build(pack_root.join("SLSB")).map_err(|e| e.to_string())?;
+                self.write_slal_pack(&pack_root.join("SLAL"))
             }
         }
     }
 
     pub fn build(&self, root_dir: PathBuf) -> Result<(), std::io::Error> {
         println!("Compiling project {}", self.pack_name);
-        self.write_pack_atomically(&root_dir, |staging| {
+        self.write_pack_merged(&root_dir, |staging| {
             self.write_binary_file(staging)?;
             self.write_fnis_files_slsb(staging)?;
             self.generate_behaviors(staging)?;
@@ -601,9 +629,8 @@ impl Package {
         }
     }
 
-    /// Write pack contents into a sibling staging dir, then swap into `root_dir`
-    /// so a mid-build failure does not leave a half-written destination.
-    fn write_pack_atomically<F>(&self, root_dir: &PathBuf, write: F) -> Result<(), std::io::Error>
+    /// Stage into a sibling dir, then soft-merge into `root_dir` (keep extras like .hkx).
+    fn write_pack_merged<F>(&self, root_dir: &PathBuf, write: F) -> Result<(), std::io::Error>
     where
         F: FnOnce(&PathBuf) -> Result<(), std::io::Error>,
     {
@@ -620,11 +647,9 @@ impl Package {
         fs::create_dir_all(&staging)?;
         match write(&staging) {
             Ok(()) => {
-                if root_dir.exists() {
-                    fs::remove_dir_all(root_dir)?;
-                }
-                fs::rename(&staging, root_dir)?;
-                Ok(())
+                let result = merge_dir_contents(&staging, root_dir);
+                let _ = fs::remove_dir_all(&staging);
+                result
             }
             Err(e) => {
                 let _ = fs::remove_dir_all(&staging);
@@ -634,7 +659,7 @@ impl Package {
     }
 
     pub fn write_slal_pack(&self, root_dir: &PathBuf) -> Result<(), String> {
-        self.write_pack_atomically(root_dir, |staging| {
+        self.write_pack_merged(root_dir, |staging| {
             self.write_slal(staging).map_err(|e| {
                 std::io::Error::new(std::io::ErrorKind::Other, e)
             })?;
@@ -663,20 +688,16 @@ impl Package {
             .map(|scene| scene_to_slal_animation(scene))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let pack_name = if self.pack_name.is_empty() {
-            self.prefix_hash.0.clone()
-        } else {
-            self.pack_name.clone()
-        };
+        let pack_id = self.fnis_mod_name();
 
         let root = serde_json::json!({
-            "name": pack_name,
+            "name": pack_id,
             "animations": animations,
         });
 
         let target_dir = root_dir.join("SLAnims").join("json");
         fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
-        let out_path = target_dir.join(format!("{}.json", pack_name));
+        let out_path = target_dir.join(format!("{}.json", pack_id));
         let file = fs::File::create(&out_path).map_err(|e| e.to_string())?;
         serde_json::to_writer_pretty(BufWriter::new(file), &root).map_err(|e| e.to_string())?;
         info!("Wrote SLAL JSON to {}", out_path.display());
@@ -733,14 +754,7 @@ impl Package {
 
     fn write_binary_file(&self, root_dir: &PathBuf) -> Result<(), std::io::Error> {
         let target_dir = root_dir.join("SKSE").join("SexLab").join("Registry");
-        let project_name = format!(
-            "{}.slr",
-            if self.pack_name.is_empty() {
-                &self.prefix_hash.0
-            } else {
-                &self.pack_name
-            }
-        );
+        let project_name = format!("{}.slr", self.slr_file_stem());
         let mut buf: Vec<u8> = Vec::new();
         buf.reserve(self.get_byte_size());
         info!(
@@ -860,42 +874,60 @@ impl Package {
         flush_fnis_lists(root_dir, &self.fnis_mod_name(), &borrowed, true).map_err(|e| e.to_string())
     }
 
-    /// Folder + `FNIS_<id>_*` stem under `animations/` / `behaviors/`.
-    /// Prefers `Author_PackName` so two authors shipping the same pack name do not collide.
+    /// FNIS / SLAL path stem: package name only (matches convert-script anim dirs).
     pub fn fnis_mod_name(&self) -> String {
-        build_fnis_mod_name(&self.pack_name, &self.pack_author, &self.prefix_hash.0)
-    }
-}
-
-fn build_fnis_mod_name(pack_name: &str, pack_author: &str, prefix_hash: &str) -> String {
-    let pack = {
-        let trimmed = pack_name.trim();
+        let trimmed = self.pack_name.trim();
         if trimmed.is_empty() {
-            prefix_hash.to_string()
+            self.prefix_hash.0.clone()
         } else {
             trimmed.to_string()
         }
-    };
-    let author = sanitize_fnis_segment(pack_author);
-    if author.is_empty() {
-        return pack;
     }
-    // Converted Billyy packs already use Author_Theme names (Billyy_Human); don't double-prefix.
-    let pack_lower = pack.to_ascii_lowercase();
-    let author_lower = author.to_ascii_lowercase();
-    if pack_lower == author_lower || pack_lower.starts_with(&format!("{author_lower}_")) {
-        return pack;
+
+    /// `.slr` stem: `PackName` or `PackName_Version`.
+    pub fn slr_file_stem(&self) -> String {
+        let base = self.fnis_mod_name();
+        let ver = sanitize_slr_version(&self.pack_version);
+        if ver.is_empty() {
+            base
+        } else {
+            format!("{base}_{ver}")
+        }
     }
-    format!("{author}_{pack}")
 }
 
-/// Keep FNIS path segments filesystem- and AnimList-safe.
-fn sanitize_fnis_segment(raw: &str) -> String {
+pub fn merge_dir_contents(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let to = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            merge_dir_contents(&entry.path(), &to)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn dir_nonempty(path: &Path) -> bool {
+    path.is_dir()
+        && fs::read_dir(path)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false)
+}
+
+/// Allow semver dots in `.slr` version segments.
+fn sanitize_slr_version(raw: &str) -> String {
     let cleaned: String = raw
         .trim()
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
                 c
             } else if c.is_whitespace() {
                 '_'
@@ -904,11 +936,13 @@ fn sanitize_fnis_segment(raw: &str) -> String {
             }
         })
         .collect::<String>()
+        .trim_matches(|c| c == '_' || c == '.')
+        .to_string();
+    cleaned
         .split('_')
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
-        .join("_");
-    cleaned
+        .join("_")
 }
 
 fn split_anim_objs(anim_obj: &str) -> Vec<String> {
@@ -1500,8 +1534,8 @@ impl EncodeBinary for Package {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_fnis_mod_name, flush_fnis_lists, infer_add_cum, scene_to_slal_animation,
-        strip_actor_stage_suffix, write_fnis_line, Package,
+        dir_nonempty, flush_fnis_lists, infer_add_cum, merge_dir_contents,
+        scene_to_slal_animation, strip_actor_stage_suffix, write_fnis_line, Package,
     };
     use crate::project::define::Sex;
     use crate::project::position::Position;
@@ -1535,24 +1569,91 @@ mod tests {
     }
 
     #[test]
-    fn fnis_mod_name_uses_author_and_pack() {
-        assert_eq!(
-            build_fnis_mod_name("AnPack", "3jiou", "xxxx"),
-            "3jiou_AnPack"
-        );
-        assert_eq!(
-            build_fnis_mod_name("AnPack", "Miss Corruption", "xxxx"),
-            "Miss_Corruption_AnPack"
-        );
-        // No author → pack only
-        assert_eq!(build_fnis_mod_name("AnPack", "", "yhd9"), "AnPack");
-        // Empty pack → hash fallback
-        assert_eq!(build_fnis_mod_name("", "3jiou", "yhd9"), "3jiou_yhd9");
-        // Already prefixed (Billyy_Human) → do not double
-        assert_eq!(
-            build_fnis_mod_name("Billyy_Human", "Billyy", "5a3f"),
-            "Billyy_Human"
-        );
+    fn fnis_mod_name_matches_pack_name_for_convert_workflow() {
+        let mut pack = Package::new();
+        pack.pack_name = "BPAnims".into();
+        pack.pack_author = "Unknown".into();
+        // Author must not change the FNIS folder — overlays expect animations/BPAnims/
+        assert_eq!(pack.fnis_mod_name(), "BPAnims");
+        assert_eq!(pack.slr_file_stem(), "BPAnims");
+
+        pack.pack_name = "Billyy_Human".into();
+        pack.pack_author = "Billyy".into();
+        assert_eq!(pack.fnis_mod_name(), "Billyy_Human");
+
+        pack.pack_name.clear();
+        pack.prefix_hash = NanoID("yhd9".into());
+        assert_eq!(pack.fnis_mod_name(), "yhd9");
+    }
+
+    #[test]
+    fn merge_dir_contents_overwrites_and_keeps_extras() {
+        let tmp = std::env::temp_dir().join(format!("slsb_merge_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let src = tmp.join("src");
+        let dst = tmp.join("dst");
+        fs::create_dir_all(src.join("a")).unwrap();
+        fs::create_dir_all(dst.join("a")).unwrap();
+        fs::write(src.join("a/file.txt"), b"new").unwrap();
+        fs::write(dst.join("a/file.txt"), b"old").unwrap();
+        fs::write(dst.join("a/clip.hkx"), b"keep").unwrap();
+        merge_dir_contents(&src, &dst).unwrap();
+        assert_eq!(fs::read(dst.join("a/file.txt")).unwrap(), b"new");
+        assert_eq!(fs::read(dst.join("a/clip.hkx")).unwrap(), b"keep");
+        assert!(dir_nonempty(&dst));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pack_version_round_trips_in_project_json_only() {
+        let mut pack = Package::new();
+        pack.pack_name = "AnPack".into();
+        pack.pack_author = "Author".into();
+        pack.pack_version = "1.2.3".into();
+        let json = serde_json::to_string(&pack).unwrap();
+        assert!(json.contains("\"pack_version\":\"1.2.3\""));
+        let loaded: Package = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.pack_version, "1.2.3");
+        let legacy = r#"{
+            "version": 4,
+            "pack_name": "AnPack",
+            "pack_author": "Author",
+            "prefix_hash": "abcd",
+            "scenes": {}
+        }"#;
+        let legacy_pack: Package = serde_json::from_str(legacy).unwrap();
+        assert!(legacy_pack.pack_version.is_empty());
+    }
+
+    #[test]
+    fn slr_uses_pack_name_and_optional_version() {
+        let mut pack = Package::new();
+        pack.pack_name = "BPAnims".into();
+        pack.pack_author = "3jiou".into();
+        assert_eq!(pack.fnis_mod_name(), "BPAnims");
+        assert_eq!(pack.slr_file_stem(), "BPAnims");
+
+        pack.pack_version = "1.2.3".into();
+        assert_eq!(pack.fnis_mod_name(), "BPAnims");
+        assert_eq!(pack.slr_file_stem(), "BPAnims_1.2.3");
+
+        let out = std::env::temp_dir().join(format!("slsb_pack_paths_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&out);
+        fs::create_dir_all(&out).unwrap();
+        pack.build(out.clone()).unwrap();
+        let slr = out
+            .join("SKSE")
+            .join("SexLab")
+            .join("Registry")
+            .join("BPAnims_1.2.3.slr");
+        assert!(slr.is_file(), "missing {}", slr.display());
+        pack.write_slal(&out).unwrap();
+        let slal = out
+            .join("SLAnims")
+            .join("json")
+            .join("BPAnims.json");
+        assert!(slal.is_file(), "missing {}", slal.display());
+        let _ = fs::remove_dir_all(&out);
     }
 
     #[test]
