@@ -468,6 +468,7 @@ const MAIN_WINDOW: &str = "main_window";
 const NEW_PROJECT: &str = "new_prjct";
 const OPEN_PROJECT: &str = "open_prjct";
 const IMPORT_SLAL: &str = "import_slal";
+const IMPORT_OSTIM: &str = "import_ostim";
 const ENRICH_SLANIM: &str = "enrich_slanim";
 const ENRICH_FNIS: &str = "enrich_fnis";
 const THEME_SYSTEM: &str = "theme_system";
@@ -500,15 +501,18 @@ fn main() {
             stage_save_and_close,
             make_position,
             mark_as_edited,
-            get_in_darkmode
+            get_in_darkmode,
+            write_export_file
         ])
         .setup(|app| {
             let matches = app.cli().matches()?;
             if let Some(command) = matches.subcommand {
                 let res = match command.name.as_str() {
                     "convert" => cli::convert(command.matches.args),
+                    "convert-ostim" => cli::convert_ostim(command.matches.args),
                     "build" => cli::build(command.matches.args),
                     "export-slal" => cli::export_slal(command.matches.args),
+                    "export-ostim" => cli::export_ostim(command.matches.args),
                     "generate-behaviors" => cli::generate_behaviors(command.matches.args),
                     _ => Err(format!("Unrecognized subcommand: {}", command.name)),
                 };
@@ -595,6 +599,7 @@ fn reload_project(reload_type: &str, window: &tauri::WebviewWindow) {
         }
         OPEN_PROJECT => prjct.load_project(window.app_handle()),
         IMPORT_SLAL => prjct.load_slal(window.app_handle()),
+        IMPORT_OSTIM => prjct.load_ostim(window.app_handle()),
         _ => Err(format!("Invalid reload type: {}", reload_type)),
     };
 
@@ -617,7 +622,7 @@ fn reload_project(reload_type: &str, window: &tauri::WebviewWindow) {
             .set_title(format!("{} - {}", DEFAULT_MAINWINDOW_TITLE, prjct.pack_name).as_str());
     }
     // Import leaves an unsaved in-memory project until Save As
-    set_edited(reload_type == IMPORT_SLAL);
+    set_edited(reload_type == IMPORT_SLAL || reload_type == IMPORT_OSTIM);
     emit_project_update(window, &prjct);
 }
 
@@ -642,6 +647,13 @@ fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
                 app,
                 IMPORT_SLAL,
                 "Import SLAL...",
+                true,
+                Option::<&str>::None,
+            )?,
+            &MenuItem::with_id(
+                app,
+                IMPORT_OSTIM,
+                "Import OStim...",
                 true,
                 Option::<&str>::None,
             )?,
@@ -703,6 +715,13 @@ fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
                         true,
                         Option::<&str>::None,
                     )?,
+                    &MenuItem::with_id(
+                        app,
+                        "export_ostim",
+                        "OStim...",
+                        true,
+                        Option::<&str>::None,
+                    )?,
                 ])
                 .build()?,
         )
@@ -755,12 +774,13 @@ fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
 
 fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().0.as_str() {
-        NEW_PROJECT | OPEN_PROJECT | IMPORT_SLAL => {
+        NEW_PROJECT | OPEN_PROJECT | IMPORT_SLAL | IMPORT_OSTIM => {
             let event_id = event.id().0.clone();
             let window = app.get_webview_window(MAIN_WINDOW).unwrap();
             let title = match event_id.as_str() {
                 NEW_PROJECT => "New Project",
                 OPEN_PROJECT => "Open Project",
+                IMPORT_OSTIM => "Import OStim",
                 _ => "Import SLAL",
             };
             // blocking_* dialogs must not run on the GTK menu/main thread (Linux freeze).
@@ -805,10 +825,11 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                 }
             });
         }
-        "export_both" | "export_slsb" | "export_slal" => {
+        "export_both" | "export_slsb" | "export_slal" | "export_ostim" => {
             let kind = match event.id().0.as_str() {
                 "export_slsb" => ExportKind::Slsb,
                 "export_slal" => ExportKind::Slal,
+                "export_ostim" => ExportKind::Ostim,
                 _ => ExportKind::Both,
             };
             start_export_with_tip(app, kind);
@@ -984,6 +1005,17 @@ async fn mark_as_edited<R: Runtime>(window: tauri::Window<R>) -> () {
 #[tauri::command]
 fn get_in_darkmode() -> bool {
     get_darkmode()
+}
+
+/// Write export contents to an already-chosen path (dialog runs on the frontend).
+/// Keeps the GTK main loop free — never call blocking_save_file from here on Linux.
+#[tauri::command]
+async fn write_export_file(path: String, contents: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::write(&path, contents.as_bytes()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /* Scene */

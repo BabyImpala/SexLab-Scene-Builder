@@ -34,6 +34,7 @@ pub enum ExportKind {
     Slsb,
     Slal,
     Both,
+    Ostim,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -224,6 +225,75 @@ impl Package {
             .map_err(|e| e.to_string())?;
 
         Package::from_slal(path).map(|prjct| *self = prjct)
+    }
+
+    pub fn load_ostim(&mut self, app: &tauri::AppHandle) -> Result<(), String> {
+        let path = app
+            .dialog()
+            .file()
+            .set_title("Import OStim pack (folder)")
+            .blocking_pick_folder()
+            .ok_or("No path to load OStim pack from".to_string())?
+            .into_path()
+            .map_err(|e| e.to_string())?;
+
+        Package::from_ostim(path).map(|prjct| *self = prjct)
+    }
+
+    pub fn from_ostim(path: PathBuf) -> Result<Package, String> {
+        let (pack_name, _author, scenes, summary) =
+            crate::project::ostim::import_ostim_scenes(&path)?;
+        let mut prjct = Package::new();
+        prjct.pack_name = pack_name;
+        prjct.scenes = scenes;
+        // Ensure PositionInfo / schema are current (import already builds v4-shaped data)
+        prjct.version = VERSION;
+        println!(
+            "Loaded {} SLSB scene(s) from {} OStim node(s) ({} transitions) in {} JSON file(s) under {}",
+            summary.scenes_imported,
+            summary.nodes_grouped,
+            summary.transitions_included,
+            summary.files_read,
+            path.display()
+        );
+        Ok(prjct)
+    }
+
+    /// Copy OStim `_N.hkx` clips into SexLab `_A#_S#` names under `dest_root`.
+    pub fn copy_ostim_hkx_for_slsb(
+        &self,
+        ostim_source: &Path,
+        dest_root: &Path,
+    ) -> Result<usize, String> {
+        let mut total = 0;
+        let anim_dir = dest_root
+            .join("meshes")
+            .join("actors")
+            .join("character")
+            .join("animations")
+            .join(self.fnis_mod_name());
+        for scene in self.scenes.values() {
+            for (si, stage) in scene.stages.iter().enumerate() {
+                let Some(event) = stage.positions.first().and_then(|p| p.event.first()) else {
+                    continue;
+                };
+                let Some(base) =
+                    crate::project::ostim::events::strip_actor_stage_suffix(event)
+                else {
+                    continue;
+                };
+                // Prefer OStim animation name without stage suffix for file search
+                let animation = base.clone();
+                total += crate::project::ostim::events::copy_ostim_hkx_to_slsb(
+                    ostim_source,
+                    &anim_dir,
+                    &animation,
+                    si + 1,
+                    scene.positions.len().max(1),
+                )?;
+            }
+        }
+        Ok(total)
     }
 
     pub fn enrich_from_slanim_source(
@@ -570,6 +640,7 @@ impl Package {
                 ExportKind::Slsb => "Export SLSB",
                 ExportKind::Slal => "Export SLAL",
                 ExportKind::Both => "Export SLSB + SLAL",
+                ExportKind::Ostim => "Export OStim",
             })
             .set_file_name(&self.fnis_mod_name())
             .blocking_pick_folder()
@@ -579,7 +650,7 @@ impl Package {
 
         let pack_root = path.join(self.fnis_mod_name());
         let write_roots = match kind {
-            ExportKind::Slsb | ExportKind::Slal => vec![pack_root.clone()],
+            ExportKind::Slsb | ExportKind::Slal | ExportKind::Ostim => vec![pack_root.clone()],
             ExportKind::Both => {
                 // SLSB and SLAL FNIS list formats clash in the same tree
                 vec![pack_root.join("SLSB"), pack_root.join("SLAL")]
@@ -601,7 +672,28 @@ impl Package {
                 self.build(pack_root.join("SLSB")).map_err(|e| e.to_string())?;
                 self.write_slal_pack(&pack_root.join("SLAL"))
             }
+            ExportKind::Ostim => self.write_ostim_pack(pack_root, None),
         }
+    }
+
+    pub fn write_ostim_pack(
+        &self,
+        root_dir: &Path,
+        hkx_source: Option<&Path>,
+    ) -> Result<(), String> {
+        let summary =
+            crate::project::ostim::write_ostim_pack(self, root_dir, hkx_source)?;
+        println!(
+            "Exported {} OStim JSON file(s) ({} scene group(s)), {} hkx copied",
+            summary.json_files, summary.scenes_written, summary.hkx_copied
+        );
+        if let Some(list) = summary.animlist {
+            println!("Animlist: {}", list.display());
+        }
+        if let Some(nem) = summary.nemesis_dir {
+            println!("Nemesis stub: {}", nem.display());
+        }
+        Ok(())
     }
 
     pub fn build(&self, root_dir: PathBuf) -> Result<(), std::io::Error> {

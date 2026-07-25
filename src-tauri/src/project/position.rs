@@ -29,6 +29,24 @@ pub struct Position {
     pub silent: bool,
     #[serde(default)]
     pub strap_on: bool,
+
+    // OStim author fill-ins / round-trip (project JSON only; not in .slr)
+    /// OStim actor lookUp (−100..=100; negative = look down).
+    #[serde(default)]
+    pub look_up: i32,
+    /// OStim actor lookLeft (−100..=100; negative = look right).
+    #[serde(default)]
+    pub look_left: i32,
+    /// OStim animationIndex; None = use actor slot index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation_index: Option<u32>,
+    /// OStim expressionOverride (e.g. "tongue").
+    #[serde(default)]
+    pub expression_override: String,
+    /// OStim equip object type ids (space/comma-separated), author fill-in.
+    #[serde(default)]
+    pub equip_objects: String,
+
     #[serde(skip_serializing, default)]
     pub extra: Extra,
     #[serde(skip_serializing, default)]
@@ -56,6 +74,12 @@ impl Position {
             open_mouth: reference.map_or(false, |pos| pos.open_mouth),
             silent: reference.map_or(false, |pos| pos.silent),
             strap_on: reference.map_or(false, |pos| pos.strap_on),
+            look_up: reference.map_or(0, |pos| pos.look_up),
+            look_left: reference.map_or(0, |pos| pos.look_left),
+            animation_index: reference.and_then(|pos| pos.animation_index),
+            expression_override: reference
+                .map_or_else(String::new, |pos| pos.expression_override.clone()),
+            equip_objects: reference.map_or_else(String::new, |pos| pos.equip_objects.clone()),
             extra: Default::default(),
             scale: 1.0,
         }

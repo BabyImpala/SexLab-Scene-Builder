@@ -23,6 +23,8 @@ pub mod fnis_list;
 
 pub mod behavior_gen;
 
+pub mod ostim;
+
 mod serialize;
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
