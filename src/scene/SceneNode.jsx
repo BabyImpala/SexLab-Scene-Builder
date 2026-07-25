@@ -138,6 +138,8 @@ function StageNode({ node, graph }) {
   const stage = node.prop('stage');
   const start = node.prop('isStart');
   const fixedLen = node.prop('fixedLen');
+  const hubReturns = Number(node.prop('hubReturns') || 0);
+  const poseFamilyLabel = node.prop('poseFamily');
 
   const label = stage.name;
   const navText = stage.extra.nav_text;
@@ -194,6 +196,16 @@ function StageNode({ node, graph }) {
                   icon: <FixedLength style={{ fontSize: 20, color: makeColor(0, 191, 255) }} />,
                 }
               : null,
+            hubReturns > 0
+              ? {
+                  title: `${hubReturns} cross-family return(s) into this hub`,
+                  icon: (
+                    <span style={{ fontSize: 12, fontWeight: 700, color: makeColor(194, 65, 12) }}>
+                      ←{hubReturns}
+                    </span>
+                  ),
+                }
+              : null,
           ].filter(Boolean)}
         />
         <div className="node-controll-button-holder">
@@ -214,6 +226,11 @@ function StageNode({ node, graph }) {
           </NodeCtrlBtn>
         </div>
       </div>
+      {poseFamilyLabel ? (
+        <div style={{ fontSize: 10, opacity: 0.55, padding: '0 8px', marginTop: -2 }}>
+          {poseFamilyLabel}
+        </div>
+      ) : null}
       <div className="stage-name">
         <h4 title={label || 'Untitled'}>{label || 'Untitled'}</h4>
       </div>
@@ -240,6 +257,18 @@ register({
         },
         position: { name: 'absolute' },
       },
+      outSide: {
+        markup: [{ tagName: 'circle', selector: 'circle' }],
+        attrs: {
+          circle: {
+            r: 3,
+            magnet: true,
+            stroke: 'transparent',
+            fill: 'transparent',
+          },
+        },
+        position: { name: 'absolute' },
+      },
       in: {
         markup: [{ tagName: 'circle', selector: 'circle' }],
         attrs: {
@@ -254,20 +283,31 @@ register({
       },
     },
     items: [
-      {
-        id: 'out',
-        group: 'out',
-        args: { x: NODE_WIDTH - 1, y: NODE_HEIGHT / 2 },
-      },
-      {
-        id: 'in',
-        group: 'in',
-        args: { x: 0, y: NODE_HEIGHT / 2 },
-      },
+      { id: 'out', group: 'out', args: { x: NODE_WIDTH - 1, y: NODE_HEIGHT / 2 } },
+      { id: 'in', group: 'in', args: { x: 0, y: NODE_HEIGHT / 2 } },
+      { id: 'outLeft', group: 'outSide', args: { x: 1, y: NODE_HEIGHT / 2 } },
+      { id: 'outTop', group: 'outSide', args: { x: NODE_WIDTH / 2, y: 1 } },
+      { id: 'outBottom', group: 'outSide', args: { x: NODE_WIDTH / 2, y: NODE_HEIGHT - 1 } },
+      { id: 'inRight', group: 'in', args: { x: NODE_WIDTH - 1, y: NODE_HEIGHT / 2 } },
+      { id: 'inTop', group: 'in', args: { x: NODE_WIDTH / 2, y: 1 } },
+      { id: 'inBottom', group: 'in', args: { x: NODE_WIDTH / 2, y: NODE_HEIGHT - 1 } },
     ],
   },
-  effect: ['name', 'stage', 'scene', 'isOrgasm', 'fixedLen', 'isStart'],
+  effect: ['name', 'stage', 'scene', 'isOrgasm', 'fixedLen', 'isStart', 'hubReturns', 'poseFamily'],
   component: StageNode,
 });
 
 export { NODE_WIDTH, NODE_HEIGHT };
+
+export const OUT_PORT_BY_SIDE = {
+  right: 'out',
+  left: 'outLeft',
+  top: 'outTop',
+  bottom: 'outBottom',
+};
+export const IN_PORT_BY_SIDE = {
+  left: 'in',
+  right: 'inRight',
+  top: 'inTop',
+  bottom: 'inBottom',
+};
