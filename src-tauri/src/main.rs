@@ -175,8 +175,10 @@ fn start_export_with_tip(app: &AppHandle, kind: ExportKind) {
     let fnis_mod = PROJECT.lock().unwrap().fnis_mod_name();
     let message = format!(
         "Export writes into a subfolder named {fnis_mod} under the folder you pick.\n\n\
-         It writes AnimLists, Behavior files, and registry data — not your .hkx animation clips.\n\n\
-         Copy your animation HKX files into:\n\
+         It writes AnimLists, Behavior files, and registry data.\n\
+         If this project was imported from OStim, matching .hkx clips are copied automatically \
+         using the event names on each stage.\n\n\
+         Otherwise, place animation HKX files in:\n\
          meshes/actors/<race>/animations/{fnis_mod}/\n\n\
          For humans that is usually:\n\
          meshes/actors/character/animations/{fnis_mod}/\n\n\
@@ -571,7 +573,8 @@ fn main() {
                     }
                 }
                 tauri::WindowEvent::CloseRequested { .. }
-                    if window.label().starts_with("stage_editor_") =>
+                    if window.label() == STAGE_EDITOR_LABEL
+                        || window.label().starts_with("stage_editor_") =>
                 {
                     window_geometry::save_window_geometry_by_label(
                         window.app_handle(),
@@ -579,7 +582,8 @@ fn main() {
                     );
                 }
                 tauri::WindowEvent::Destroyed
-                    if window.label().starts_with("stage_editor_") =>
+                    if window.label() == STAGE_EDITOR_LABEL
+                        || window.label().starts_with("stage_editor_") =>
                 {
                     unblock_main_if_no_stage_editors(window.app_handle());
                 }
@@ -1053,6 +1057,8 @@ fn delete_scene<R: Runtime>(window: tauri::Window<R>, id: NanoID) -> Result<Scen
 
 /* Stage */
 
+const STAGE_EDITOR_LABEL: &str = "stage_editor";
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct EditorPayload {
     pub scene: NanoID,
@@ -1064,7 +1070,7 @@ struct EditorPayload {
 fn any_stage_editor_open<R: Runtime>(app: &AppHandle<R>) -> bool {
     app.webview_windows()
         .keys()
-        .any(|label| label.starts_with("stage_editor_"))
+        .any(|label| label == STAGE_EDITOR_LABEL || label.starts_with("stage_editor_"))
 }
 
 fn set_main_window_blocked<R: Runtime>(app: &AppHandle<R>, blocked: bool) {
@@ -1085,14 +1091,22 @@ fn unblock_main_if_no_stage_editors<R: Runtime>(app: &AppHandle<R>) {
 
 fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: EditorPayload) {
     let stage = &payload.stage;
-    let label = format!("stage_editor_{}", stage.id.0);
+    let title = format!(
+        "Stage Editor [{}]",
+        if stage.name.is_empty() {
+            "Untitled"
+        } else {
+            stage.name.as_str()
+        }
+    );
     info!(
         "Opening Stage {} from Scene {}",
         stage.id.0, payload.scene.0
     );
-    // Reopening the same stage: focus and re-send payload (recovers empty first open).
-    if let Some(existing) = app.get_webview_window(&label) {
+    // Reuse one editor webview so antd/React are not re-parsed per stage.
+    if let Some(existing) = app.get_webview_window(STAGE_EDITOR_LABEL) {
         set_main_window_blocked(app, true);
+        let _ = existing.set_title(&title);
         let _ = existing.set_focus();
         if let Err(e) = existing.emit("on_data_received", payload.clone()) {
             error!("Failed to re-send stage editor payload: {}", e);
@@ -1105,17 +1119,10 @@ fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: Editor
     };
     let builder = WebviewWindowBuilder::new(
         app,
-        label,
+        STAGE_EDITOR_LABEL,
         tauri::WebviewUrl::App("./stage.html".into()),
     )
-    .title(format!(
-        "Stage Editor [{}]",
-        if stage.name.is_empty() {
-            "Untitled"
-        } else {
-            stage.name.as_str()
-        }
-    ))
+    .title(title)
     .min_inner_size(720.0, 540.0)
     .inner_size(1152.0, 864.0)
     .resizable(true);
@@ -1148,18 +1155,53 @@ fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: Editor
     sync_theme_from_window(&theme_window);
 }
 
+fn blank_stage_from_parts(
+    existing_stage_count: usize,
+    positions: &[PositionInfo],
+    template: Option<&Stage>,
+) -> Stage {
+    let n = existing_stage_count + 1;
+    let actor_n = positions.len().max(1);
+    Stage {
+        id: NanoID::new_nanoid(),
+        name: format!("Stage {n}/{n}"),
+        positions: template.map_or_else(
+            || vec![crate::project::position::Position::new(None); actor_n],
+            |s| {
+                s.positions
+                    .iter()
+                    .map(|p| crate::project::position::Position::new(Some(p)))
+                    .collect()
+            },
+        ),
+        tags: vec![],
+        extra: Default::default(),
+    }
+}
+
 #[tauri::command]
 async fn open_stage_editor<R: Runtime>(
     app: tauri::AppHandle<R>,
-    active_scene: Scene,
+    scene_id: NanoID,
+    positions: Vec<PositionInfo>,
     stage: Option<Stage>,
+    #[allow(non_snake_case)]
+    existing_stage_count: Option<usize>,
+    template_stage: Option<Stage>,
 ) -> () {
+    let stage = stage.unwrap_or_else(|| {
+        blank_stage_from_parts(
+            existing_stage_count.unwrap_or(0),
+            &positions,
+            template_stage.as_ref(),
+        )
+    });
     open_stage_editor_impl(
         &app,
         EditorPayload {
-            scene: active_scene.id.clone(),
-            stage: stage.unwrap_or(Stage::new(&active_scene)),
-            positions: active_scene.positions.clone(),
+            scene: scene_id,
+            stage,
+            positions,
             dark: get_darkmode(),
         },
     );
@@ -1168,14 +1210,17 @@ async fn open_stage_editor<R: Runtime>(
 #[tauri::command]
 async fn open_stage_editor_from<R: Runtime>(
     app: tauri::AppHandle<R>,
-    active_scene: Scene,
+    scene_id: NanoID,
+    positions: Vec<PositionInfo>,
     copy_stage: Stage,
+    #[allow(non_snake_case)]
+    existing_stage_count: Option<usize>,
 ) -> () {
     // Clone must get a fresh id so save inserts a new stage instead of overwriting the source
     let mut stage = copy_stage;
     stage.id = NanoID::new_nanoid();
     if stage.name.is_empty() {
-        let n = active_scene.stages.len() + 1;
+        let n = existing_stage_count.unwrap_or(0) + 1;
         stage.name = format!("Stage {n}/{n}");
     } else {
         stage.name = format!("{} (Copy)", stage.name);
@@ -1183,9 +1228,9 @@ async fn open_stage_editor_from<R: Runtime>(
     open_stage_editor_impl(
         &app,
         EditorPayload {
-            scene: active_scene.id.clone(),
+            scene: scene_id,
             stage,
-            positions: active_scene.positions.clone(),
+            positions,
             dark: get_darkmode(),
         },
     );

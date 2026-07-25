@@ -35,10 +35,11 @@ const makeStrips = (list = []) => {
   );
 };
 
-function PositionField({ position, info, onChange }) {
+function PositionField({ position, info, onChange, raceKeys: raceKeysProp }) {
   const [basicAnim, setBasicAnim] = useState(true);
   const [workingAnim, setWorkingAnim] = useState(undefined);
   const [sequenceOpen, setSequenceOpen] = useState(false);
+  const raceKeys = Array.isArray(raceKeysProp) ? raceKeysProp : null;
 
   const makeSequenceMenu = (events) => {
     let sequences = [];
@@ -98,6 +99,7 @@ function PositionField({ position, info, onChange }) {
           <Card className="position-attribute-card" title={'Race'}>
             <RaceSelect
               race={info.race}
+              raceKeys={raceKeys}
               onSelect={(e) => {
                 onChange(position, { ...info, race: e, sex: { ...info.sex, futa: e === 'Human' && info.sex.futa } });
               }}

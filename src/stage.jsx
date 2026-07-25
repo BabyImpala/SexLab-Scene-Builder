@@ -1,15 +1,15 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, lazy, Suspense, useMemo } from "react";
 import { emit, listen } from '@tauri-apps/api/event'
 import { invoke } from "@tauri-apps/api/core"
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import ReactDOM from "react-dom/client";
 import { useImmer } from "use-immer";
 import { FileDoneOutlined, TagsOutlined, SaveOutlined, TeamOutlined } from '@ant-design/icons';
-import { Input, Button, Tooltip, InputNumber, Card, Layout, Row, Col, Tabs, notification, Collapse, ConfigProvider, Select } from 'antd';
+import { Input, Button, Tooltip, InputNumber, Card, Layout, Row, Col, Tabs, notification, Collapse, ConfigProvider, Select, Spin } from 'antd';
 
 import { tagsSFW, tagsNSFW } from "./common/Tags"
-import PositionField from "./stage/PositionField";
-import TagTree from "./components/TagTree";
+const PositionField = lazy(() => import("./stage/PositionField"));
+const TagTree = lazy(() => import("./components/TagTree"));
 import "./stage.css";
 import "./App.css";
 // import "./Dark.css";
@@ -106,6 +106,13 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
   const [fixedLen, setFixedLen] = useState(_stage.extra?.fixed_len);
   const [navText, setNavText] = useState(_stage.extra?.nav_text || '');
   const [sound, setSound] = useState(_stage.extra?.sound || '');
+  const [raceKeys, setRaceKeys] = useState([]);
+
+  useEffect(() => {
+    invoke('get_race_keys')
+      .then((result) => setRaceKeys(Array.isArray(result) ? result : []))
+      .catch(() => setRaceKeys([]));
+  }, []);
 
   useEffect(() => {
     const unlisten = listen('toggle_darkmode', (event) => {
@@ -243,22 +250,24 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
     }
   };
 
-  const positionsCollapsed = [
-    { // Tags
+  const positionsCollapsed = useMemo(() => [
+    {
       key: '1',
       label: 'Tags',
       extra: <TagsOutlined />,
       children:
         <div className="tag-display-box">
-          <TagTree
-            tags={tags}
-            onChange={setTags}
-            tagsSFW={tagsSFW}
-            tagsNSFW={tagsNSFW}
-          />
+          <Suspense fallback={<Spin />}>
+            <TagTree
+              tags={tags}
+              onChange={setTags}
+              tagsSFW={tagsSFW}
+              tagsNSFW={tagsNSFW}
+            />
+          </Suspense>
         </div>
     },
-    { // Positions
+    {
       key: '2',
       label: 'Positions',
       extra: <TeamOutlined />,
@@ -267,6 +276,7 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
           type="editable-card"
           activeKey={activePosition}
           hideAdd={positions.length > 4}
+          destroyInactiveTabPane
           onEdit={onPositionTabEdit}
           onChange={(e) => {
             setActivePosition(e);
@@ -278,29 +288,32 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
               key: p.key,
               children: (
                 <div className="position">
-                  <PositionField
-                    position={p.position}
-                    info={p.info}
-                    onChange={(newPosition, newInfo) => {
-                      updatePositions((draft) => {
-                        draft[i].position = newPosition;
-                        draft[i].info = newInfo;
-                      });
-                      emit('on_position_change', {
-                        sceneId: _sceneId,
-                        stageId: _stage.id,
-                        positionIdx: i,
-                        info: newInfo,
-                      });
-                    }}
-                  />
+                  <Suspense fallback={<Spin />}>
+                    <PositionField
+                      position={p.position}
+                      info={p.info}
+                      raceKeys={raceKeys}
+                      onChange={(newPosition, newInfo) => {
+                        updatePositions((draft) => {
+                          draft[i].position = newPosition;
+                          draft[i].info = newInfo;
+                        });
+                        emit('on_position_change', {
+                          sceneId: _sceneId,
+                          stageId: _stage.id,
+                          positionIdx: i,
+                          info: newInfo,
+                        });
+                      }}
+                    />
+                  </Suspense>
                 </div>
               ),
             };
           })}
         />
     },
-    { //Extra
+    {
       key: '3',
       label: 'Extra',
       extra: <FileDoneOutlined />,
@@ -314,7 +327,7 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
                 extra={
                   <Tooltip
                     title={
-                      'A short text for the player to read when given the option to branch into this stage.'
+                      'Short player-facing description for this branch (e.g. "bow down"). Do not put icon names here.'
                     }
                   >
                     <Button type="text">Info</Button>
@@ -327,6 +340,7 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
                   showCount
                   rows={3}
                   style={{ resize: 'none', width: '100%' }}
+                  placeholder='e.g. bow down'
                   defaultValue={_stage.extra.navText}
                   value={navText}
                   onChange={(e) => setNavText(e.target.value)}
@@ -395,7 +409,18 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
           </Row>
         </>
     }
-  ]
+  ], [
+    tags,
+    positions,
+    activePosition,
+    raceKeys,
+    navText,
+    sound,
+    fixedLen,
+    _sceneId,
+    _stage.id,
+    _stage.extra,
+  ]);
 
   return (
     <ConfigProvider theme={getAppTheme(isDark)}>
@@ -425,7 +450,7 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
           </Row>
         </Header>
         <Content className="stage-body">
-          <Collapse items={positionsCollapsed} defaultActiveKey={['1', '2', '3']} />
+          <Collapse items={positionsCollapsed} defaultActiveKey={['2']} />
         </Content>
       </Layout>
     </ConfigProvider>
