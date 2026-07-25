@@ -739,7 +739,7 @@ fn ostim_node_to_stage(ostim_id: &str, value: &Value, layout_index: usize) -> Re
     Ok(stage)
 }
 
-/// Legacy helper: single OStim JSON → standalone SLSB scene (one-node component).
+#[cfg(test)]
 pub fn ostim_json_to_scene(ostim_id: &str, value: &Value) -> Result<Scene, String> {
     let mut raw = IndexMap::new();
     raw.insert(ostim_id.to_string(), value.clone());
