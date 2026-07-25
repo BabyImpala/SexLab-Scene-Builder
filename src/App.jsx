@@ -1,23 +1,44 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useImmer } from "use-immer";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
 import { Graph, Shape } from '@antv/x6'
 import { History } from "@antv/x6-plugin-history";
-import { Menu, Layout, Card, Input, Space, Button, Empty, Modal, Tooltip, notification, Divider, Switch, Checkbox, Row, Col, InputNumber, Select, ConfigProvider } from 'antd'
+import { Menu, Layout, Card, Input, Space, Button, Empty, Modal, Tooltip, notification, Divider, Switch, Checkbox, Row, Col, InputNumber, Select, ConfigProvider, Dropdown, Segmented, Typography } from 'antd'
 import {
   ExperimentOutlined, FolderOutlined, PlusOutlined, ExclamationCircleOutlined, QuestionCircleOutlined, DiffOutlined, ZoomInOutlined, ZoomOutOutlined,
   DeleteOutlined, DoubleLeftOutlined, DoubleRightOutlined, PicCenterOutlined, CompressOutlined, PushpinOutlined, DragOutlined, WarningOutlined,
-  ApartmentOutlined
+  ApartmentOutlined, DownloadOutlined, UndoOutlined, UnorderedListOutlined
 } from '@ant-design/icons';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import './ResizableSidebar.css';
 const { Header, Content, Footer, Sider } = Layout;
 const { confirm } = Modal;
-import { STAGE_EDGE, STAGE_EDGE_SHAPEID } from "./scene/SceneEdge"
+import { STAGE_EDGE, STAGE_EDGE_SHAPEID, forwardEdgeAttrs } from "./scene/SceneEdge"
 import { Furnitures } from "./common/Furniture";
 import "./scene/SceneNode"
-import { NODE_WIDTH, NODE_HEIGHT } from "./scene/SceneNode"
+import {
+  graphCoordsStacked,
+  planToEdgeConfig,
+  applyEdgePlan,
+} from "./scene/graphLayout"
+import {
+  computeGraphPresentation,
+  applyEdgeVisibility,
+  resolveVisibleKeys,
+  applyNodeFamilyDim,
+  sceneGraphSignature,
+} from "./scene/graphPresentation"
+import {
+  buildCanvasSvg,
+  buildCanvasLayoutJson,
+  defaultGraphExportName,
+} from "./scene/exportCanvasSvg"
+import { connectionsToCsv } from "./components/GraphConnectionsTable"
+import GraphNavOutline from "./components/GraphNavOutline"
+import GraphNodeSearch from "./components/GraphNodeSearch"
+import { LARGE_SCENE_NODE_THRESHOLD } from "./scene/graphLayoutClusters"
+import { pathToNode } from "./scene/spanningForest"
 import "./App.css";
 // import "./Dark.css";
 import ScenePosition from "./scene/ScenePosition";
@@ -29,29 +50,9 @@ function makeMenuItem(label, key, icon, children, disabled, danger) {
 import { tagsSFW, tagsNSFW } from "./common/Tags"
 import TagTree from "./components/TagTree";
 import { remove } from "@tauri-apps/plugin-fs";
+import { save } from "@tauri-apps/plugin-dialog";
 
 const ZOOM_OPTIONS = { minScale: 0.25, maxScale: 5 };
-
-function buildStageEdgeConfig(sourceNode, targetNode) {
-  const sp = sourceNode.getPosition();
-  const tp = targetNode.getPosition();
-  const isWrap = tp.y > sp.y + 20 && tp.x + NODE_WIDTH < sp.x;
-  const edge = {
-    shape: STAGE_EDGE_SHAPEID,
-    source: { cell: sourceNode.id, port: 'out' },
-    target: { cell: targetNode.id, port: 'in' },
-  };
-  if (isWrap) {
-    const corridorY = sp.y + NODE_HEIGHT + (tp.y - sp.y - NODE_HEIGHT) / 2;
-    edge.router = { name: 'normal' };
-    edge.vertices = [
-      { x: sp.x + NODE_WIDTH + 24, y: sp.y + NODE_HEIGHT / 2 },
-      { x: sp.x + NODE_WIDTH + 24, y: corridorY },
-      { x: tp.x - 24, y: corridorY },
-    ];
-  }
-  return { edge, isWrap };
-}
 
 function graphGridArgs(dark) {
   return [
@@ -91,11 +92,58 @@ function App() {
   const [cloneToTargetId, setCloneToTargetId] = useState(null);
   const inEdit = useRef(false);
   const [showAreas, setShowAreas] = useState(false);
+  /** browse = mind-map skin (primary tree); edit = state-machine wiring */
+  const [graphWorkMode, setGraphWorkMode] = useState('browse'); // browse | edit
+  const [edgeFilterMode, setEdgeFilterMode] = useState('primary'); // primary | neighborhood | family | all
+  const [focusNodeIds, setFocusNodeIds] = useState([]);
+  const [mapFamilyFilter, setMapFamilyFilter] = useState('all');
+  const [navOutline, setNavOutline] = useState([]);
+  const [showOutline, setShowOutline] = useState(true);
+  const [pathIds, setPathIds] = useState([]);
+  const graphMetaRef = useRef({
+    families: new Map(),
+    hubReturnCounts: new Map(),
+    clusters: [],
+    forest: null,
+  });
+  /** Cached full presentation — invalidated when topology/positions change. */
+  const presentationCacheRef = useRef(null);
+  const layoutDirtyRef = useRef(false);
+  const edgeFilterModeRef = useRef(edgeFilterMode);
+  const focusNodeIdsRef = useRef(focusNodeIds);
+  const mapFamilyFilterRef = useRef(mapFamilyFilter);
+  const graphWorkModeRef = useRef(graphWorkMode);
+  /** Packed positions at scene open (before arrange) — snap-back target. */
+  const layoutSnapshotRef = useRef(null);
+  const refreshGraphEdgesRef = useRef(() => {});
+  const rebuildGraphPresentationRef = useRef(() => {});
   const activeSceneRef = useRef(null);
 
   useEffect(() => {
     activeSceneRef.current = activeScene;
   }, [activeScene]);
+
+  useEffect(() => {
+    edgeFilterModeRef.current = edgeFilterMode;
+  }, [edgeFilterMode]);
+
+  useEffect(() => {
+    focusNodeIdsRef.current = focusNodeIds;
+  }, [focusNodeIds]);
+
+  useEffect(() => {
+    mapFamilyFilterRef.current = mapFamilyFilter;
+  }, [mapFamilyFilter]);
+
+  useEffect(() => {
+    graphWorkModeRef.current = graphWorkMode;
+  }, [graphWorkMode]);
+
+  const familyFilterOptions = useMemo(() => {
+    const fam = graphMetaRef.current.families;
+    if (!fam?.size) return [];
+    return [...new Set(fam.values())].sort();
+  }, [navOutline, activeScene?.id]);
 
   function generatePositionId() {
     return `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -145,6 +193,7 @@ function App() {
           return new Shape.Edge({
             shape: STAGE_EDGE_SHAPEID,
             ...STAGE_EDGE,
+            attrs: forwardEdgeAttrs(isDark),
           });
         },
       }
@@ -178,18 +227,29 @@ function App() {
           }
           it.update();
         });
+        layoutDirtyRef.current = true;
         if (inEdit.current) return;
         setEdited(true);
+      })
+      .on("node:mouseup", () => {
+        if (!layoutDirtyRef.current) return;
+        layoutDirtyRef.current = false;
+        presentationCacheRef.current = null;
+        queueMicrotask(() => rebuildGraphPresentationRef.current?.());
       })
       // Edge Events
       .on("edge:contextmenu", ({ e, x, y, edge, view }) => {
         e.stopPropagation();
         edge.remove();
         setEdited(true);
+        presentationCacheRef.current = null;
+        queueMicrotask(() => rebuildGraphPresentationRef.current?.());
       })
       .on("edge:connected", (e) => {
         if (inEdit.current) return;
         setEdited(true);
+        presentationCacheRef.current = null;
+        queueMicrotask(() => rebuildGraphPresentationRef.current?.());
       })
       // Custom Events
       .on("node:doMarkRoot", ({ node }) => {
@@ -227,6 +287,15 @@ function App() {
         setCloneToSourceScene(sourceScene);
         setCloneToTargetId(null);
         setCloneToOpen(true);
+      })
+      .on('node:click', ({ node }) => {
+        setFocusNodeIds([node.id]);
+        focusNodeIdsRef.current = [node.id];
+        const forest = graphMetaRef.current.forest;
+        if (forest?.parent) {
+          setPathIds(pathToNode(node.id, forest.parent));
+        }
+        queueMicrotask(() => refreshGraphEdgesRef.current?.());
       })
 
     setGraph(newGraph);
@@ -523,12 +592,91 @@ function App() {
 
     const sceneGraph = newscene.graph || {};
     const graphIds = Object.keys(sceneGraph);
-    // Place stacked SLAL/default graphs at layered coords before mount so
-    // X6 react HTML + edges never lock to a shared (40,40) origin.
+    const getName = (id) =>
+      newscene.stages?.find((s) => s.id === id)?.name || id;
+    const large = graphIds.length >= LARGE_SCENE_NODE_THRESHOLD;
+
+    // Snapshot packed coords for "Restore positions" (SLSB layout only — not OStim JSON).
+    layoutSnapshotRef.current = new Map(
+      graphIds.map((id) => {
+        const g = sceneGraph[id] || {};
+        return [id, { x: Number(g.x) || 40, y: Number(g.y) || 40 }];
+      })
+    );
+
+    if (large) {
+      setGraphWorkMode('browse');
+      graphWorkModeRef.current = 'browse';
+      setEdgeFilterMode('primary');
+      edgeFilterModeRef.current = 'primary';
+      setShowOutline(true);
+    } else {
+      setGraphWorkMode('browse');
+      graphWorkModeRef.current = 'browse';
+      setEdgeFilterMode('primary');
+      edgeFilterModeRef.current = 'primary';
+    }
+    setFocusNodeIds([]);
+    focusNodeIdsRef.current = [];
+    setPathIds([]);
+    setMapFamilyFilter('all');
+    presentationCacheRef.current = null;
+
     const stacked = graphCoordsStacked(sceneGraph);
-    const layoutPositions = stacked
-      ? computeLayeredPositions(sceneGraph, newscene.root, graphIds)
-      : null;
+    // Browse defaults to forest arrange when coords are stacked or scene is large.
+    const shouldArrange = stacked || large;
+    const presentation = computeGraphPresentation({
+      sceneGraph,
+      rootId: newscene.root,
+      nodeIds: graphIds,
+      getName,
+      isDark,
+      edgeMode: 'primary',
+      focusNodeIds: [],
+      preferCluster: false,
+      rearrange: shouldArrange,
+      useForestLayout: true,
+      stages: newscene.stages || [],
+      buildRows: false,
+      existingPositions: shouldArrange
+        ? null
+        : new Map(
+            graphIds.map((id) => {
+              const g = sceneGraph[id] || {};
+              return [id, { x: Number(g.x) || 40, y: Number(g.y) || 40 }];
+            })
+          ),
+    });
+
+    graphMetaRef.current = {
+      families: presentation.families,
+      hubReturnCounts: presentation.hubReturnCounts,
+      clusters: presentation.clusters,
+      forest: presentation.forest,
+    };
+    presentationCacheRef.current = {
+      signature: presentation.signature || sceneGraphSignature(
+        Object.fromEntries(
+          graphIds.map((id) => {
+            const pos = presentation.positions?.get(id) || sceneGraph[id] || {};
+            return [
+              id,
+              {
+                dest: sceneGraph[id]?.dest || [],
+                x: pos.x,
+                y: pos.y,
+              },
+            ];
+          })
+        )
+      ),
+      forest: presentation.forest,
+      allEdges: presentation.allEdges,
+      ranks: presentation.ranks,
+      families: presentation.families,
+      positions: presentation.positions,
+    };
+    setNavOutline(presentation.outline || []);
 
     for (const [key, { x, y }] of Object.entries(sceneGraph)) {
       const stage = newscene.stages.find((s) => s.id === key);
@@ -536,22 +684,42 @@ function App() {
         console.warn('Graph references missing stage', key, newscene);
         continue;
       }
-      const pos = layoutPositions?.get(key) || { x, y };
+      const pos = presentation.positions?.get(key) || { x, y };
       const node = addStageToGraph(stage, pos.x, pos.y);
       updateNodeProps(stage, node, newscene);
+      node.prop('poseFamily', presentation.families?.get(key) || '');
+      node.prop(
+        'hubReturns',
+        presentation.hubReturnCounts?.get(key) || 0
+      );
     }
     const nodes = graph.getNodes();
+    const planByPair = new Map(
+      (presentation.allEdges || presentation.edges).map((p) => [
+        `${p.source}\0${p.target}`,
+        p,
+      ])
+    );
     for (const [sourceid, { dest }] of Object.entries(sceneGraph)) {
       if (!dest.length) continue;
-      const sourceNode = nodes.find(node => node.id === sourceid);
-      if (!sourceNode) continue;
-      dest.forEach(targetid => {
-        const target = nodes.find(node => node.id === targetid);
-        if (!target) return;
-        const { edge } = buildStageEdgeConfig(sourceNode, target);
-        graph.addEdge(edge);
+      if (!nodes.find((node) => node.id === sourceid)) continue;
+      dest.forEach((targetid) => {
+        if (!nodes.find((node) => node.id === targetid)) return;
+        const plan = planByPair.get(`${sourceid}\0${targetid}`);
+        if (plan) {
+          graph.addEdge(planToEdgeConfig(plan));
+        } else {
+          graph.addEdge({
+            shape: STAGE_EDGE_SHAPEID,
+            source: { cell: sourceid, port: 'out' },
+            target: { cell: targetid, port: 'in' },
+            ...STAGE_EDGE,
+            attrs: forwardEdgeAttrs(isDark),
+          });
+        }
       });
     }
+    applyEdgeVisibility(graph, presentation.visibleKeys);
     setEdited(false);
     // Wait until the graph container is laid out. On first project/SLAL load the
     // scene box was display:none and/or the tags panel is still mounting, so an
@@ -584,99 +752,10 @@ function App() {
   }
 
   const gridSize = 260;
-  const LAYOUT_H_GAP = 280;
-  const LAYOUT_V_GAP = 150;
-  const MAX_STAGES_PER_ROW = 5;
 
-  const graphCoordsStacked = (sceneGraph) => {
-    const positions = Object.values(sceneGraph || {}).map(({ x, y }) => ({ x, y }));
-    if (positions.length < 2) return false;
-    const first = positions[0];
-    return positions.every((p) => p.x === first.x && p.y === first.y);
-  };
-
-  const computeLayeredPositions = (sceneGraph, rootId, nodeIds) => {
-    const outgoing = new Map();
-    nodeIds.forEach((id) => {
-      const dest = (sceneGraph[id]?.dest || []).filter((d) => nodeIds.includes(d));
-      outgoing.set(id, dest);
-    });
-    const start = nodeIds.includes(rootId) ? rootId : nodeIds[0];
-    const level = new Map();
-    const queue = start ? [start] : [];
-    if (start) level.set(start, 0);
-    while (queue.length) {
-      const id = queue.shift();
-      for (const dest of outgoing.get(id) || []) {
-        if (!level.has(dest)) {
-          level.set(dest, level.get(id) + 1);
-          queue.push(dest);
-        }
-      }
-    }
-    const orphans = nodeIds.filter((id) => !level.has(id));
-    const byLevel = new Map();
-    for (const [id, lv] of level) {
-      if (!byLevel.has(lv)) byLevel.set(lv, []);
-      byLevel.get(lv).push(id);
-    }
-
-    const ordered = [];
-    for (const [, ids] of [...byLevel.entries()].sort((a, b) => a[0] - b[0])) {
-      ordered.push(...ids);
-    }
-    ordered.push(...orphans);
-
-    const linear =
-      orphans.length === 0 &&
-      [...byLevel.values()].every((ids) => ids.length <= 1);
-
-    const positions = new Map();
-    if (linear && ordered.length > MAX_STAGES_PER_ROW) {
-      // Cap row width so zoomToFit does not shrink node text too far.
-      ordered.forEach((id, i) => {
-        const row = Math.floor(i / MAX_STAGES_PER_ROW);
-        const col = i % MAX_STAGES_PER_ROW;
-        positions.set(id, {
-          x: 40 + col * LAYOUT_H_GAP,
-          y: 40 + row * LAYOUT_V_GAP,
-        });
-      });
-    } else {
-      for (const [lv, ids] of [...byLevel.entries()].sort((a, b) => a[0] - b[0])) {
-        ids.forEach((id, i) => {
-          positions.set(id, {
-            x: 40 + lv * LAYOUT_H_GAP,
-            y: 40 + i * LAYOUT_V_GAP,
-          });
-        });
-      }
-      if (orphans.length) {
-        const maxRows = Math.max(
-          1,
-          ...[...byLevel.values()].map((ids) => ids.length),
-          0
-        );
-        const orphanY = 40 + maxRows * LAYOUT_V_GAP;
-        orphans.forEach((id, i) => {
-          const row = Math.floor(i / MAX_STAGES_PER_ROW);
-          const col = i % MAX_STAGES_PER_ROW;
-          positions.set(id, {
-            x: 40 + col * LAYOUT_H_GAP,
-            y: orphanY + row * LAYOUT_V_GAP,
-          });
-        });
-      }
-    }
-    return positions;
-  };
-
-  const arrangeStages = (rootId = activeScene?.root, markEdited = true) => {
-    if (!graph) return;
-    const nodes = graph.getNodes();
-    if (!nodes.length) return;
-
+  const buildLiveSceneGraph = () => {
     const sceneGraph = {};
+    const nodes = graph.getNodes();
     nodes.forEach((n) => {
       const edges = graph.getOutgoingEdges(n) || [];
       sceneGraph[n.id] = {
@@ -685,38 +764,382 @@ function App() {
         y: n.getPosition().y,
       };
     });
-    const start =
-      nodes.find((n) => n.id === rootId) ||
-      nodes.find((n) => n.prop('isStart')) ||
-      nodes[0];
-    const positions = computeLayeredPositions(
+    return sceneGraph;
+  };
+
+  /** Cheap path: visibility + dim only (no re-rank / re-route). */
+  const refreshGraphEdgeVisibility = () => {
+    if (!graph || !activeScene) return;
+    const sceneGraph = buildLiveSceneGraph();
+    const graphIds = Object.keys(sceneGraph);
+    const sig = sceneGraphSignature(sceneGraph);
+    const cache = presentationCacheRef.current;
+
+    if (!cache || cache.signature !== sig) {
+      rebuildGraphPresentation({ rearrange: false });
+      return;
+    }
+
+    const { visibleKeys, families } = resolveVisibleKeys({
       sceneGraph,
-      start.id,
-      nodes.map((n) => n.id)
+      nodeIds: graphIds,
+      edgeMode: edgeFilterModeRef.current,
+      focusNodeIds: focusNodeIdsRef.current,
+      familyFilter: mapFamilyFilterRef.current,
+      forest: cache.forest,
+      ranks: cache.ranks,
+    });
+
+    applyEdgeVisibility(graph, visibleKeys);
+    applyNodeFamilyDim(graph, families || cache.families, mapFamilyFilterRef.current);
+
+    const focus = focusNodeIdsRef.current?.[0];
+    if (focus && cache.forest?.parent) {
+      setPathIds(pathToNode(focus, cache.forest.parent));
+    }
+  };
+
+  /**
+   * Full path: re-rank, re-route, apply changed edge plans, refresh cache.
+   * Call on topology/position changes and Arrange — not on every click.
+   */
+  const rebuildGraphPresentation = ({
+    rearrange = false,
+    rootId = null,
+  } = {}) => {
+    if (!graph || !activeScene) return;
+    const sceneGraph = buildLiveSceneGraph();
+    const graphIds = Object.keys(sceneGraph);
+    if (!graphIds.length) return;
+    const getName = (id) =>
+      activeScene.stages?.find((s) => s.id === id)?.name || id;
+    const positions = new Map(
+      graphIds.map((id) => [
+        id,
+        { x: sceneGraph[id].x, y: sceneGraph[id].y },
+      ])
     );
-    for (const [id, pos] of positions) {
+    const browse = graphWorkModeRef.current === 'browse';
+    const startId =
+      rootId ||
+      activeScene.root ||
+      graphIds[0];
+    const presentation = computeGraphPresentation({
+      sceneGraph,
+      rootId: startId,
+      nodeIds: graphIds,
+      getName,
+      isDark,
+      edgeMode:
+        edgeFilterModeRef.current ||
+        (browse ? 'primary' : 'neighborhood'),
+      focusNodeIds: focusNodeIdsRef.current,
+      preferCluster: false,
+      rearrange,
+      useForestLayout: true,
+      stages: activeScene.stages || [],
+      buildRows: false,
+      existingPositions: rearrange ? null : positions,
+    });
+
+    graphMetaRef.current = {
+      families: presentation.families,
+      hubReturnCounts: presentation.hubReturnCounts,
+      clusters: presentation.clusters,
+      forest: presentation.forest,
+    };
+    setNavOutline(presentation.outline || []);
+
+    if (rearrange) {
+      for (const [id, pos] of presentation.positions) {
+        const node = graph.getCellById(id);
+        if (node) {
+          node.setPosition(pos.x, pos.y);
+          node.prop('poseFamily', presentation.families?.get(id) || '');
+          node.prop(
+            'hubReturns',
+            presentation.hubReturnCounts?.get(id) || 0
+          );
+        }
+      }
+    }
+
+    const planByPair = new Map(
+      (presentation.allEdges || []).map((p) => [`${p.source}\0${p.target}`, p])
+    );
+    graph.getEdges().forEach((edge) => {
+      const s = edge.getSourceCellId();
+      const t = edge.getTargetCellId();
+      const plan = planByPair.get(`${s}\0${t}`);
+      if (!plan) return;
+      const changed = applyEdgePlan(edge, plan);
+      if (changed) {
+        const edgeView = graph.findViewByCell(edge);
+        if (edgeView) edgeView.update();
+      }
+    });
+
+    const liveAfter = rearrange ? buildLiveSceneGraph() : sceneGraph;
+    const { visibleKeys } = resolveVisibleKeys({
+      sceneGraph: liveAfter,
+      nodeIds: Object.keys(liveAfter),
+      edgeMode: edgeFilterModeRef.current,
+      focusNodeIds: focusNodeIdsRef.current,
+      familyFilter: mapFamilyFilterRef.current,
+      forest: presentation.forest,
+      ranks: presentation.ranks,
+    });
+    applyEdgeVisibility(graph, visibleKeys);
+    applyNodeFamilyDim(
+      graph,
+      presentation.families,
+      mapFamilyFilterRef.current
+    );
+
+    presentationCacheRef.current = {
+      signature: sceneGraphSignature(liveAfter),
+      forest: presentation.forest,
+      allEdges: presentation.allEdges,
+      ranks: presentation.ranks,
+      families: presentation.families,
+      positions: presentation.positions,
+    };
+
+    const focus = focusNodeIdsRef.current?.[0];
+    if (focus && presentation.forest?.parent) {
+      setPathIds(pathToNode(focus, presentation.forest.parent));
+    }
+  };
+
+  refreshGraphEdgesRef.current = refreshGraphEdgeVisibility;
+  rebuildGraphPresentationRef.current = () =>
+    rebuildGraphPresentation({ rearrange: false });
+
+  const arrangeStages = (rootId = activeScene?.root, markEdited = true) => {
+    if (!graph?.getNodes()?.length) return;
+    presentationCacheRef.current = null;
+    rebuildGraphPresentation({ rearrange: true, rootId });
+    try {
+      graph.zoomToFit({ padding: 24, maxScale: 1 });
+      graph.centerContent();
+    } catch (_) { /* ignore */ }
+    if (markEdited) setEdited(true);
+  };
+
+  /**
+   * Restore node positions from the snapshot taken when the scene was opened
+   * (packed SLSB coords). Does not change graph edges. Layout is never part of
+   * OStim scene JSON — only SLSB Node {x,y}.
+   */
+  const restorePackedPositions = (markEdited = true) => {
+    if (!graph || !layoutSnapshotRef.current) return;
+    const snap = layoutSnapshotRef.current;
+    for (const [id, pos] of snap) {
       const node = graph.getCellById(id);
       if (node) node.setPosition(pos.x, pos.y);
     }
-    graph.getEdges().forEach((edge) => {
-      const source = edge.getSourceNode();
-      const target = edge.getTargetNode();
-      if (source && target) {
-        const { edge: cfg } = buildStageEdgeConfig(source, target);
-        if (cfg.vertices) {
-          edge.setRouter(cfg.router);
-          edge.setVertices(cfg.vertices);
-        } else {
-          edge.setRouter(STAGE_EDGE.router);
-          edge.setVertices([]);
-        }
-      }
-      const edgeView = graph.findViewByCell(edge);
-      if (edgeView) edgeView.update();
+    presentationCacheRef.current = null;
+    queueMicrotask(() => {
+      rebuildGraphPresentationRef.current?.();
+      try {
+        graph.zoomToFit({ padding: 24, maxScale: 1 });
+        graph.centerContent();
+      } catch (_) { /* ignore */ }
     });
-    graph.zoomToFit({ padding: 24, maxScale: 1 });
-    graph.centerContent();
     if (markEdited) setEdited(true);
+  };
+
+  const jumpToNode = (nodeId) => {
+    if (!nodeId || !graph) return;
+    setFocusNodeIds([nodeId]);
+    focusNodeIdsRef.current = [nodeId];
+    const forest = graphMetaRef.current.forest;
+    if (forest?.parent) {
+      setPathIds(pathToNode(nodeId, forest.parent));
+    }
+    if (graphWorkModeRef.current === 'browse') {
+      setEdgeFilterMode('primary');
+      edgeFilterModeRef.current = 'primary';
+    } else {
+      setEdgeFilterMode('neighborhood');
+      edgeFilterModeRef.current = 'neighborhood';
+    }
+    queueMicrotask(() => {
+      refreshGraphEdgesRef.current?.();
+      requestAnimationFrame(() => {
+        try {
+          graph.resize();
+          const cell = graph.getCellById(nodeId);
+          if (cell) {
+            graph.centerCell(cell);
+            graph.zoomTo(0.9, { maxScale: 1.2, minScale: 0.4 });
+            graph.select(cell);
+          }
+        } catch (_) { /* ignore */ }
+      });
+    });
+  };
+
+  const applyWorkMode = (mode) => {
+    setGraphWorkMode(mode);
+    graphWorkModeRef.current = mode;
+    if (mode === 'browse') {
+      setEdgeFilterMode('primary');
+      edgeFilterModeRef.current = 'primary';
+      setShowOutline(true);
+    } else {
+      setEdgeFilterMode(
+        focusNodeIdsRef.current?.length ? 'neighborhood' : 'all'
+      );
+      edgeFilterModeRef.current = focusNodeIdsRef.current?.length
+        ? 'neighborhood'
+        : 'all';
+    }
+    queueMicrotask(() => refreshGraphEdgesRef.current?.());
+  };
+
+  const exportGraphCanvas = async (format = 'svg') => {
+    if (!graph || graph.getCellCount() === 0) {
+      api.warning({
+        message: 'Nothing to export',
+        description: 'Open a scene with stages on the canvas first.',
+        placement: 'topRight',
+      });
+      return;
+    }
+    const sceneName = activeScene?.name || 'scene';
+    const isSvg = format === 'svg';
+    const defaultName = defaultGraphExportName(sceneName, isSvg ? 'svg' : 'json');
+
+    let path;
+    try {
+      path = await save({
+        title: isSvg ? 'Export graph SVG' : 'Export graph layout JSON',
+        defaultPath: defaultName,
+        filters: [
+          {
+            name: isSvg ? 'SVG graph' : 'Graph layout JSON',
+            extensions: isSvg ? ['svg'] : ['json'],
+          },
+        ],
+      });
+    } catch (err) {
+      api.error({
+        message: 'Graph export failed',
+        description: String(err),
+        placement: 'topRight',
+      });
+      return;
+    }
+    if (!path) return;
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    let contents;
+    try {
+      // Export only currently visible edges (what you see on the Map).
+      contents = isSvg
+        ? buildCanvasSvg(graph, {
+            sceneName,
+            isDark,
+            onlyVisible: true,
+          })
+        : buildCanvasLayoutJson(graph, {
+            sceneName,
+            isDark,
+            onlyVisible: true,
+          });
+    } catch (err) {
+      api.error({
+        message: 'Graph export failed',
+        description: String(err),
+        placement: 'topRight',
+      });
+      return;
+    }
+
+    try {
+      await invoke('write_export_file', { path, contents });
+      api.success({
+        message: 'Graph exported',
+        description: path,
+        placement: 'topRight',
+      });
+    } catch (err) {
+      api.error({
+        message: 'Graph export failed',
+        description: String(err),
+        placement: 'topRight',
+      });
+    }
+  };
+
+  const exportConnectionsTable = async () => {
+    if (!graph || !activeScene) {
+      api.warning({
+        message: 'Nothing to export',
+        description: 'Open a scene first.',
+        placement: 'topRight',
+      });
+      return;
+    }
+    const sceneGraph = buildLiveSceneGraph();
+    const getName = (id) =>
+      activeScene.stages?.find((s) => s.id === id)?.name || id;
+    const presentation = computeGraphPresentation({
+      sceneGraph,
+      rootId: activeScene.root,
+      nodeIds: Object.keys(sceneGraph),
+      getName,
+      isDark,
+      edgeMode: 'all',
+      rearrange: false,
+      useForestLayout: false,
+      stages: activeScene.stages || [],
+      buildRows: true,
+      existingPositions: new Map(
+        Object.entries(sceneGraph).map(([id, n]) => [id, { x: n.x, y: n.y }])
+      ),
+    });
+    const rows = presentation.connectionRows || [];
+    const sceneName = activeScene?.name || 'scene';
+    const defaultName = defaultGraphExportName(sceneName, 'csv').replace(
+      '_graph.csv',
+      '_connections.csv'
+    );
+    let path;
+    try {
+      path = await save({
+        title: 'Export connections CSV',
+        defaultPath: defaultName,
+        filters: [{ name: 'CSV', extensions: ['csv'] }],
+      });
+    } catch (err) {
+      api.error({
+        message: 'Export failed',
+        description: String(err),
+        placement: 'topRight',
+      });
+      return;
+    }
+    if (!path) return;
+    try {
+      await invoke('write_export_file', {
+        path,
+        contents: connectionsToCsv(rows),
+      });
+      api.success({
+        message: 'Connections exported',
+        description: path,
+        placement: 'topRight',
+      });
+    } catch (err) {
+      api.error({
+        message: 'Export failed',
+        description: String(err),
+        placement: 'topRight',
+      });
+    }
   };
 
   // Place new stages at x/y when provided; otherwise to the right of existing nodes
@@ -1246,7 +1669,7 @@ function App() {
                                   />
                                 </Tooltip>
                                 <Tooltip
-                                  title="Arrange stages"
+                                  title="Arrange navigation layout (primary spanning tree)"
                                   mouseEnterDelay={0.5}
                                 >
                                   <Button
@@ -1255,6 +1678,106 @@ function App() {
                                     icon={<ApartmentOutlined />}
                                     onClick={() => arrangeStages()}
                                   />
+                                </Tooltip>
+                                <Tooltip
+                                  title="Restore packed positions from scene open (SLSB coords only)"
+                                  mouseEnterDelay={0.5}
+                                >
+                                  <Button
+                                    type="text"
+                                    size="small"
+                                    icon={<UndoOutlined />}
+                                    disabled={!layoutSnapshotRef.current}
+                                    onClick={() => restorePackedPositions()}
+                                  />
+                                </Tooltip>
+                                <Divider type="vertical" />
+                                <Segmented
+                                  size="small"
+                                  value={graphWorkMode}
+                                  onChange={(v) => applyWorkMode(v)}
+                                  options={[
+                                    { value: 'browse', label: 'Browse' },
+                                    { value: 'edit', label: 'Edit' },
+                                  ]}
+                                />
+                                <Select
+                                  size="small"
+                                  value={edgeFilterMode}
+                                  style={{ width: 140 }}
+                                  onChange={(v) => {
+                                    setEdgeFilterMode(v);
+                                    edgeFilterModeRef.current = v;
+                                    queueMicrotask(() => refreshGraphEdgesRef.current?.());
+                                  }}
+                                  options={[
+                                    { value: 'primary', label: 'Edges: Primary' },
+                                    { value: 'neighborhood', label: 'Edges: Near' },
+                                    { value: 'family', label: 'Edges: Family' },
+                                    { value: 'all', label: 'Edges: All' },
+                                  ]}
+                                />
+                                <Select
+                                  size="small"
+                                  value={mapFamilyFilter}
+                                  style={{ width: 160 }}
+                                  onChange={(v) => {
+                                    setMapFamilyFilter(v);
+                                    mapFamilyFilterRef.current = v;
+                                    queueMicrotask(() => refreshGraphEdgesRef.current?.());
+                                  }}
+                                  options={[
+                                    { value: 'all', label: 'All families' },
+                                    ...familyFilterOptions.map((f) => ({
+                                      value: f,
+                                      label: f,
+                                    })),
+                                  ]}
+                                />
+                                <GraphNodeSearch
+                                  stages={activeScene?.stages || []}
+                                  onJump={jumpToNode}
+                                />
+                                <Tooltip title="Toggle navigation outline" mouseEnterDelay={0.5}>
+                                  <Button
+                                    type={showOutline ? 'primary' : 'text'}
+                                    size="small"
+                                    icon={<UnorderedListOutlined />}
+                                    onClick={() => setShowOutline((v) => !v)}
+                                  />
+                                </Tooltip>
+                                <Tooltip
+                                  title="Export graph / connections"
+                                  mouseEnterDelay={0.5}
+                                >
+                                  <Dropdown
+                                    menu={{
+                                      items: [
+                                        {
+                                          key: 'svg',
+                                          label: 'Export visible SVG',
+                                          onClick: () => exportGraphCanvas('svg'),
+                                        },
+                                        {
+                                          key: 'json',
+                                          label: 'Export visible layout JSON',
+                                          onClick: () => exportGraphCanvas('json'),
+                                        },
+                                        {
+                                          key: 'csv',
+                                          label: 'Export all connections CSV',
+                                          onClick: () => exportConnectionsTable(),
+                                        },
+                                      ],
+                                    }}
+                                    trigger={['click']}
+                                  >
+                                    <Button
+                                      type="text"
+                                      size="small"
+                                      icon={<DownloadOutlined />}
+                                    />
+                                  </Dropdown>
                                 </Tooltip>
                                 <Tooltip
                                   title="Lock canvas"
@@ -1311,8 +1834,56 @@ function App() {
                                 </Tooltip>
                               </Space>
                             </div>
-                            <div className="graph-container">
-                              <div id="graph" ref={graphcontainer_ref} />
+                            <div
+                              className="graph-container"
+                              style={{
+                                display: 'flex',
+                                flexDirection: 'row',
+                                height: '100%',
+                                minHeight: 0,
+                              }}
+                            >
+                              {showOutline && (
+                                <div
+                                  className="graph-outline-host"
+                                  style={{
+                                    flex: '0 0 240px',
+                                    maxWidth: 280,
+                                    minWidth: 180,
+                                    borderRight: isDark
+                                      ? '1px solid #333'
+                                      : '1px solid #e8e8e8',
+                                    padding: '8px 8px 4px',
+                                    overflow: 'hidden',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                  }}
+                                >
+                                  <Typography.Text
+                                    strong
+                                    style={{ fontSize: 12, marginBottom: 4 }}
+                                  >
+                                    Navigation
+                                  </Typography.Text>
+                                  <GraphNavOutline
+                                    outline={navOutline}
+                                    selectedIds={focusNodeIds}
+                                    pathIds={pathIds}
+                                    isDark={isDark}
+                                    onSelectNode={jumpToNode}
+                                  />
+                                </div>
+                              )}
+                              <div
+                                id="graph"
+                                ref={graphcontainer_ref}
+                                className="graph-canvas-host"
+                                style={{
+                                  flex: '1 1 auto',
+                                  minWidth: 0,
+                                  height: '100%',
+                                }}
+                              />
                             </div>
                           </Card>
                         </div>
@@ -1475,6 +2046,20 @@ function App() {
                           >
                             Allow Bed
                           </Checkbox>
+                          <Input
+                            addonBefore="OStim type"
+                            placeholder="optional override (e.g. singlebed, wall)"
+                            value={
+                              (activeScene && activeScene.furniture.ostim_type) || ''
+                            }
+                            onChange={(e) => {
+                              updateActiveScene((prev) => {
+                                prev.furniture.ostim_type = e.target.value;
+                                return prev;
+                              });
+                              setEdited(true);
+                            }}
+                          />
                           <Checkbox
                             onChange={(e) => {
                               updateActiveScene((prev) => {
