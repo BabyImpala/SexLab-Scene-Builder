@@ -1,4 +1,11 @@
-import { NODE_WIDTH, NODE_HEIGHT, OUT_PORT_BY_SIDE, IN_PORT_BY_SIDE } from './SceneNode';
+import {
+  NODE_WIDTH,
+  NODE_HEIGHT,
+  OUT_PORT_BY_SIDE,
+  IN_PORT_BY_SIDE,
+  nodeHeightForDegree,
+  nodeWidthForKind,
+} from './SceneNode';
 import {
   STAGE_EDGE_SHAPEID,
   ROUNDED_CONNECTOR,
@@ -172,22 +179,53 @@ function placeNodes(byLevel, orphans, nodeIds, ranks) {
   return { positions, hGap, vGap };
 }
 
-function portY(pos) {
-  return pos.y + NODE_HEIGHT / 2;
+function portY(pos, size) {
+  const h = size?.height || NODE_HEIGHT;
+  return pos.y + h / 2;
 }
 
-function portX(pos) {
-  return pos.x + NODE_WIDTH / 2;
+function portX(pos, size) {
+  const w = size?.width || NODE_WIDTH;
+  return pos.x + w / 2;
+}
+
+function sizeOf(nodeSizes, id) {
+  return (
+    nodeSizes?.get(id) || {
+      width: NODE_WIDTH,
+      height: NODE_HEIGHT,
+      inCount: 1,
+      outCount: 1,
+    }
+  );
+}
+
+function slotAxisY(pos, size, portId, role) {
+  const h = size.height || NODE_HEIGHT;
+  const m = String(portId || '').match(/^(?:in|out)(\d+)$/);
+  if (!m) return portY(pos, size);
+  const idx = Number(m[1]);
+  const count = Math.max(
+    1,
+    role === 'out' ? size.outCount || 1 : size.inCount || 1
+  );
+  return pos.y + ((idx + 1) / (count + 1)) * h;
 }
 
 /**
- * Prefer LTR sides. Top/bottom only when |dx| is small and |dy| is large.
+ * Prefer vertical sides when cards overlap in X; LTR/RTL otherwise.
  */
-function chooseSides(sp, tp) {
-  const dx = portX(tp) - portX(sp);
-  const dy = portY(tp) - portY(sp);
+function chooseSides(sp, tp, ss, ts) {
+  const dx = portX(tp, ts) - portX(sp, ss);
+  const dy = portY(tp, ts) - portY(sp, ss);
+  const sw = ss?.width || NODE_WIDTH;
+  const tw = ts?.width || NODE_WIDTH;
+  const avgW = (sw + tw) / 2;
+  const overlapX =
+    Math.min(sp.x + sw, tp.x + tw) - Math.max(sp.x, tp.x);
   const stacked =
-    Math.abs(dx) < NODE_WIDTH * 0.4 && Math.abs(dy) > NODE_HEIGHT * 0.9;
+    Math.abs(dy) > NODE_HEIGHT * 0.55 &&
+    (overlapX > avgW * 0.25 || Math.abs(dx) < avgW * 1.05);
   if (stacked) {
     return {
       outSide: dy >= 0 ? 'bottom' : 'top',
@@ -201,22 +239,65 @@ function chooseSides(sp, tp) {
 }
 
 /** Stub just outside a node side. */
-function sideStub(pos, side, stub, along = 0, role = 'out') {
-  const cx = portX(pos);
-  const cy = portY(pos);
+function sideStub(pos, side, stub, along = 0, role = 'out', size = null, portOverride = null) {
+  const s = size || {
+    width: NODE_WIDTH,
+    height: NODE_HEIGHT,
+    inCount: 1,
+    outCount: 1,
+  };
+  const w = s.width || NODE_WIDTH;
+  const h = s.height || NODE_HEIGHT;
   const ports = role === 'out' ? OUT_PORT_BY_SIDE : IN_PORT_BY_SIDE;
+  const port = portOverride || ports[side] || ports.right;
+  const cy =
+    side === 'left' || side === 'right'
+      ? slotAxisY(pos, s, port, role)
+      : portY(pos, s);
+  const cx = portX(pos, s);
   switch (side) {
     case 'left':
-      return { x: pos.x - stub, y: cy + along, port: ports.left };
+      return { x: pos.x - stub, y: cy + along, port };
     case 'right':
-      return { x: pos.x + NODE_WIDTH + stub, y: cy + along, port: ports.right };
+      return { x: pos.x + w + stub, y: cy + along, port };
     case 'top':
-      return { x: cx + along, y: pos.y - stub, port: ports.top };
+      return { x: cx + along, y: pos.y - stub, port };
     case 'bottom':
-      return { x: cx + along, y: pos.y + NODE_HEIGHT + stub, port: ports.bottom };
+      return { x: cx + along, y: pos.y + h + stub, port };
     default:
-      return { x: pos.x + NODE_WIDTH + stub, y: cy + along, port: ports.right };
+      return { x: pos.x + w + stub, y: cy + along, port };
   }
+}
+
+function assignSlotPorts(edges, getName) {
+  const nameOf = getName || ((id) => id);
+  /** @type {Map<string, string[]>} */
+  const outs = new Map();
+  /** @type {Map<string, string[]>} */
+  const inns = new Map();
+  for (const e of edges) {
+    if (!outs.has(e.source)) outs.set(e.source, []);
+    if (!inns.has(e.target)) inns.set(e.target, []);
+    outs.get(e.source).push(e.target);
+    inns.get(e.target).push(e.source);
+  }
+  for (const [, list] of outs) {
+    list.sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+  }
+  for (const [, list] of inns) {
+    list.sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+  }
+  /** @type {Map<string, { out: string, in: string }>} */
+  const slots = new Map();
+  for (const e of edges) {
+    const oi = Math.max(0, outs.get(e.source).indexOf(e.target));
+    const ii = Math.max(0, inns.get(e.target).indexOf(e.source));
+    slots.set(`${e.source}\0${e.target}`, {
+      out: `out${oi}`,
+      in: `in${ii}`,
+    });
+  }
+  return slots;
 }
 
 function routeBetweenStubs(exit, enter, outSide, inSide, midPrefer) {
@@ -278,7 +359,7 @@ function routeBetweenStubs(exit, enter, outSide, inSide, midPrefer) {
 }
 
 function classifyEdge(sourceRank, targetRank) {
-  // Provisional only — planEdges reclassifies by geometry for cyclic graphs.
+  // Provisional — planEdges reclassifies by geometry.
   if (sourceRank < 0 || targetRank < 0) {
     if (targetRank >= 0 && sourceRank < 0) return 'forward';
     if (sourceRank >= 0 && targetRank < 0) return 'back';
@@ -327,12 +408,16 @@ function indexBy(list, keyFn) {
   return map;
 }
 
-function pairBounds(sp, tp) {
+function pairBounds(sp, tp, ss, ts) {
+  const sw = ss?.width || NODE_WIDTH;
+  const sh = ss?.height || NODE_HEIGHT;
+  const tw = ts?.width || NODE_WIDTH;
+  const th = ts?.height || NODE_HEIGHT;
   return {
     minX: Math.min(sp.x, tp.x),
-    maxX: Math.max(sp.x + NODE_WIDTH, tp.x + NODE_WIDTH),
+    maxX: Math.max(sp.x + sw, tp.x + tw),
     minY: Math.min(sp.y, tp.y),
-    maxY: Math.max(sp.y + NODE_HEIGHT, tp.y + NODE_HEIGHT),
+    maxY: Math.max(sp.y + sh, tp.y + th),
   };
 }
 
@@ -473,6 +558,16 @@ function segmentHitsRect(a, b, r) {
   return false;
 }
 
+function pathLength(pts) {
+  if (!pts?.length) return Infinity;
+  let len = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    len +=
+      Math.abs(pts[i + 1].x - pts[i].x) + Math.abs(pts[i + 1].y - pts[i].y);
+  }
+  return len;
+}
+
 function pathHitsObstacle(pts, obstacles) {
   if (!pts?.length || !obstacles?.length) return false;
   for (let i = 0; i < pts.length - 1; i++) {
@@ -483,31 +578,104 @@ function pathHitsObstacle(pts, obstacles) {
   return false;
 }
 
-function pickClearPath(candidates, obstacles) {
-  if (!candidates?.length) return [];
-  for (const pts of candidates) {
-    if (!pathHitsObstacle(pts, obstacles)) return pts;
+/** Prefer clear paths; among those, shorter. `bias` breaks near-ties. */
+function pickBestCandidate(candidates, obstacles) {
+  if (!candidates?.length) return null;
+  let best = null;
+  let bestScore = Infinity;
+  for (const c of candidates) {
+    if (!c?.path?.length) continue;
+    const hits = pathHitsObstacle(c.path, obstacles);
+    const score =
+      (hits ? 1e9 : 0) + pathLength(c.path) + (c.bias || 0);
+    if (score < bestScore) {
+      bestScore = score;
+      best = c;
+    }
   }
-  return candidates[candidates.length - 1];
+  return best || candidates[0];
 }
 
-function buildObstacleRects(positions, excludeIds) {
+/** Same-side exit/entry wraps outside the pair. */
+function sameSideWrap(exit, enter, side, lanePrefer) {
+  if (side === 'right' || side === 'left') {
+    const sx =
+      side === 'right'
+        ? Math.max(lanePrefer, exit.x + MIN_SEG, enter.x + MIN_SEG)
+        : Math.min(lanePrefer, exit.x - MIN_SEG, enter.x - MIN_SEG);
+    return simplifyOrtho([
+      { x: exit.x, y: exit.y },
+      { x: sx, y: exit.y },
+      { x: sx, y: enter.y },
+      { x: enter.x, y: enter.y },
+    ]);
+  }
+  const sy =
+    side === 'bottom'
+      ? Math.max(lanePrefer, exit.y + MIN_SEG, enter.y + MIN_SEG)
+      : Math.min(lanePrefer, exit.y - MIN_SEG, enter.y - MIN_SEG);
+  return simplifyOrtho([
+    { x: exit.x, y: exit.y },
+    { x: exit.x, y: sy },
+    { x: enter.x, y: sy },
+    { x: enter.x, y: enter.y },
+  ]);
+}
+
+/** Facing, same-side, and mixed side pairs; primary listed first. */
+function candidateSidePairs(primary) {
+  const facing = [
+    [primary.outSide, primary.inSide],
+    ['right', 'left'],
+    ['left', 'right'],
+    ['bottom', 'top'],
+    ['top', 'bottom'],
+  ];
+  const same = [
+    ['right', 'right'],
+    ['left', 'left'],
+    ['bottom', 'bottom'],
+    ['top', 'top'],
+  ];
+  const mixed = [
+    ['right', 'top'],
+    ['right', 'bottom'],
+    ['left', 'top'],
+    ['left', 'bottom'],
+    ['top', 'left'],
+    ['top', 'right'],
+    ['bottom', 'left'],
+    ['bottom', 'right'],
+  ];
+  const seen = new Set();
+  const out = [];
+  for (const pair of [...facing, ...same, ...mixed]) {
+    const key = `${pair[0]}>${pair[1]}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(pair);
+  }
+  return out;
+}
+
+function buildObstacleRects(positions, excludeIds, nodeSizes) {
   const skip = new Set(excludeIds || []);
   const rects = [];
   for (const [id, pos] of positions) {
     if (skip.has(id) || !pos) continue;
+    const s = sizeOf(nodeSizes, id);
     rects.push({
       id,
       x: pos.x - OBS_PAD,
       y: pos.y - OBS_PAD,
-      width: NODE_WIDTH + OBS_PAD * 2,
-      height: NODE_HEIGHT + OBS_PAD * 2,
+      width: s.width + OBS_PAD * 2,
+      height: s.height + OBS_PAD * 2,
     });
   }
   return rects;
 }
 
-function planEdges(rawEdges, positions, { isDark = false } = {}) {
+function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getName = null } = {}) {
   /** @type {Map<string, ReturnType<typeof LanePool>>} */
   const localUnderPools = new Map();
   /** @type {Map<string, ReturnType<typeof LanePool>>} */
@@ -520,9 +688,10 @@ function planEdges(rawEdges, positions, { isDark = false } = {}) {
   const stubInCount = new Map();
 
   const keyPair = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+  const slots = assignSlotPorts(rawEdges, getName);
 
-  const takeLocalUnder = (sp, tp) => {
-    const b = pairBounds(sp, tp);
+  const takeLocalUnder = (sp, tp, ss, ts) => {
+    const b = pairBounds(sp, tp, ss, ts);
     const key = `u:${Math.round(b.maxY / 48)}:${Math.round((b.minX + b.maxX) / 240)}`;
     if (!localUnderPools.has(key)) {
       localUnderPools.set(key, LanePool(b.maxY + MIN_SEG, BACK_LANE_GAP));
@@ -530,8 +699,8 @@ function planEdges(rawEdges, positions, { isDark = false } = {}) {
     return { laneY: localUnderPools.get(key).take(), bounds: b };
   };
 
-  const takeLocalOver = (sp, tp) => {
-    const b = pairBounds(sp, tp);
+  const takeLocalOver = (sp, tp, ss, ts) => {
+    const b = pairBounds(sp, tp, ss, ts);
     const key = `o:${Math.round(b.minY / 48)}:${Math.round((b.minX + b.maxX) / 240)}`;
     if (!localOverPools.has(key)) {
       localOverPools.set(
@@ -580,13 +749,19 @@ function planEdges(rawEdges, positions, { isDark = false } = {}) {
   return sorted.map((edge) => {
     const sp = positions.get(edge.source);
     const tp = positions.get(edge.target);
+    const ss = sizeOf(nodeSizes, edge.source);
+    const ts = sizeOf(nodeSizes, edge.target);
+    const slot = slots.get(`${edge.source}\0${edge.target}`) || {
+      out: 'out0',
+      in: 'in0',
+    };
     if (!sp || !tp) {
       return {
         source: edge.source,
         target: edge.target,
         kind: edge.kind,
-        sourcePort: 'out',
-        targetPort: 'in',
+        sourcePort: slot.out,
+        targetPort: slot.in,
         router: { name: 'orth', args: { padding: 24 } },
         connector: ROUNDED_CONNECTOR,
         vertices: [],
@@ -594,27 +769,58 @@ function planEdges(rawEdges, positions, { isDark = false } = {}) {
       };
     }
 
-    const primarySides = chooseSides(sp, tp);
-    const obstacles = buildObstacleRects(positions, [edge.source, edge.target]);
+    const primarySides = chooseSides(sp, tp, ss, ts);
+    const obstacles = buildObstacleRects(positions, [], nodeSizes);
     const attrs = edge.kind === 'back' ? backAttrs : forwardAttrs;
-    const bounds = pairBounds(sp, tp);
-    const sidePrefer = bounds.maxX + MIN_SEG;
+    const bounds = pairBounds(sp, tp, ss, ts);
+    const preferRight = bounds.maxX + MIN_SEG;
+    const preferLeft = bounds.minX - MIN_SEG;
+    const { laneY: underY } = takeLocalUnder(sp, tp, ss, ts);
+    const { laneY: overY } = takeLocalOver(sp, tp, ss, ts);
 
     const planForSides = (outSide, inSide) => {
       const outMeta = peekStub(stubOutCount, edge.source, outSide);
       const inMeta = peekStub(stubInCount, edge.target, inSide);
-      const exit = sideStub(sp, outSide, outMeta.stub, outMeta.along, 'out');
-      const enter = sideStub(tp, inSide, inMeta.stub, inMeta.along, 'in');
-      const outVert = outSide === 'top' || outSide === 'bottom';
-      const midPrefer = outVert
-        ? gutterLane(
-            `vy:${keyPair(edge.source, edge.target)}:${Math.round((exit.y + enter.y) / 2)}`,
-            (exit.y + enter.y) / 2
-          )
-        : gutterLane(
-            `g:${keyPair(edge.source, edge.target)}:${Math.round((exit.x + enter.x) / 2)}`,
-            (exit.x + enter.x) / 2
-          );
+      const outPort =
+        outSide === 'right' ? slot.out : OUT_PORT_BY_SIDE[outSide];
+      const inPort = inSide === 'left' ? slot.in : IN_PORT_BY_SIDE[inSide];
+      const exit = sideStub(
+        sp,
+        outSide,
+        outMeta.stub,
+        outMeta.along,
+        'out',
+        ss,
+        outPort
+      );
+      const enter = sideStub(
+        tp,
+        inSide,
+        inMeta.stub,
+        inMeta.along,
+        'in',
+        ts,
+        inPort
+      );
+      const same = outSide === inSide;
+      let path;
+      if (same) {
+        const lane =
+          outSide === 'right'
+            ? preferRight
+            : outSide === 'left'
+              ? preferLeft
+              : outSide === 'bottom'
+                ? underY
+                : overY;
+        path = sameSideWrap(exit, enter, outSide, lane);
+      } else {
+        const outVert = outSide === 'top' || outSide === 'bottom';
+        const midPrefer = outVert
+          ? (exit.y + enter.y) / 2
+          : (exit.x + enter.x) / 2;
+        path = routeBetweenStubs(exit, enter, outSide, inSide, midPrefer);
+      }
       return {
         exit,
         enter,
@@ -622,44 +828,97 @@ function planEdges(rawEdges, positions, { isDark = false } = {}) {
         inSide,
         outMeta,
         inMeta,
-        path: routeBetweenStubs(exit, enter, outSide, inSide, midPrefer),
+        path,
       };
     };
 
-    const primary = planForSides(primarySides.outSide, primarySides.inSide);
+    const sidePairs = candidateSidePairs(primarySides);
+    const sidePlans = sidePairs.map(([outSide, inSide], i) => {
+      const plan = planForSides(outSide, inSide);
+      const isPrimary =
+        outSide === primarySides.outSide && inSide === primarySides.inSide;
+      return { ...plan, bias: isPrimary ? 0 : 24 + i * 4 };
+    });
 
-    const altSides =
-      primarySides.outSide === 'top' || primarySides.outSide === 'bottom'
-        ? {
-            outSide: portX(tp) >= portX(sp) ? 'right' : 'left',
-            inSide: portX(tp) >= portX(sp) ? 'left' : 'right',
-          }
-        : {
-            outSide: portY(tp) >= portY(sp) ? 'bottom' : 'top',
-            inSide: portY(tp) >= portY(sp) ? 'top' : 'bottom',
-          };
-    const alternate = planForSides(altSides.outSide, altSides.inSide);
-
-    const ltr =
-      primary.outSide === 'right' || primary.outSide === 'left'
-        ? primary
-        : alternate.outSide === 'right' || alternate.outSide === 'left'
-          ? alternate
-          : planForSides('right', 'left');
-    const { laneY: underY } = takeLocalUnder(sp, tp);
-    const { laneY: overY } = takeLocalOver(sp, tp);
-    const candidates = [
-      primary.path,
-      alternate.path,
-      underU(ltr.exit.x, ltr.exit.y, ltr.enter.x, ltr.enter.y, underY, sidePrefer),
-      overU(ltr.exit.x, ltr.exit.y, ltr.enter.x, ltr.enter.y, overY, sidePrefer),
-      sideC(ltr.exit.x, ltr.exit.y, ltr.enter.x, ltr.enter.y, sidePrefer),
+    const ltrPlan =
+      sidePlans.find((p) => p.outSide === 'right' && p.inSide === 'left') ||
+      sidePlans.find((p) => p.outSide === 'left' && p.inSide === 'right') ||
+      sidePlans[0];
+    const wrapPlans = [
+      {
+        ...ltrPlan,
+        path: underU(
+          ltrPlan.exit.x,
+          ltrPlan.exit.y,
+          ltrPlan.enter.x,
+          ltrPlan.enter.y,
+          underY,
+          preferRight
+        ),
+        bias: 120,
+      },
+      {
+        ...ltrPlan,
+        path: overU(
+          ltrPlan.exit.x,
+          ltrPlan.exit.y,
+          ltrPlan.enter.x,
+          ltrPlan.enter.y,
+          overY,
+          preferRight
+        ),
+        bias: 124,
+      },
+      {
+        ...ltrPlan,
+        path: sideC(
+          ltrPlan.exit.x,
+          ltrPlan.exit.y,
+          ltrPlan.enter.x,
+          ltrPlan.enter.y,
+          preferRight
+        ),
+        bias: 128,
+      },
     ];
 
-    const chosenPath = pickClearPath(candidates, obstacles);
-    let chosen = primary;
-    if (chosenPath === alternate.path) chosen = alternate;
-    else if (chosenPath !== primary.path) chosen = ltr;
+    const chosen = pickBestCandidate([...sidePlans, ...wrapPlans], obstacles);
+    if (!chosen) {
+      return {
+        source: edge.source,
+        target: edge.target,
+        kind: edge.kind,
+        sourcePort: slot.out,
+        targetPort: slot.in,
+        router: { name: 'orth', args: { padding: 24 } },
+        connector: ROUNDED_CONNECTOR,
+        vertices: [],
+        attrs,
+      };
+    }
+
+    let finalPath = chosen.path;
+    if (chosen.outSide !== chosen.inSide) {
+      const outVert =
+        chosen.outSide === 'top' || chosen.outSide === 'bottom';
+      const midPrefer = outVert
+        ? gutterLane(
+            `vy:${keyPair(edge.source, edge.target)}:${Math.round((chosen.exit.y + chosen.enter.y) / 2)}`,
+            (chosen.exit.y + chosen.enter.y) / 2
+          )
+        : gutterLane(
+            `g:${keyPair(edge.source, edge.target)}:${Math.round((chosen.exit.x + chosen.enter.x) / 2)}`,
+            (chosen.exit.x + chosen.enter.x) / 2
+          );
+      const routed = routeBetweenStubs(
+        chosen.exit,
+        chosen.enter,
+        chosen.outSide,
+        chosen.inSide,
+        midPrefer
+      );
+      if (!pathHitsObstacle(routed, obstacles)) finalPath = routed;
+    }
 
     commitStub(stubOutCount, chosen.outMeta.key, chosen.outMeta.i);
     commitStub(stubInCount, chosen.inMeta.key, chosen.inMeta.i);
@@ -674,7 +933,7 @@ function planEdges(rawEdges, positions, { isDark = false } = {}) {
       inSide: chosen.inSide,
       router: { name: 'normal' },
       connector: ROUNDED_CONNECTOR,
-      vertices: chosenPath,
+      vertices: finalPath,
       attrs,
     };
   });
@@ -709,15 +968,21 @@ export function layoutSceneGraph(sceneGraph, rootId, nodeIds, { isDark = false }
 
 /** Build an X6 edge config object from a layout plan. */
 export function planToEdgeConfig(plan) {
-  return {
+  const cfg = {
     shape: STAGE_EDGE_SHAPEID,
-    source: { cell: plan.source, port: plan.sourcePort || 'out' },
-    target: { cell: plan.target, port: plan.targetPort || 'in' },
+    source: { cell: plan.source, port: plan.sourcePort || 'out0' },
+    target: { cell: plan.target, port: plan.targetPort || 'in0' },
     router: plan.router,
     connector: plan.connector,
     vertices: plan.vertices || [],
     attrs: plan.attrs,
+    data: {
+      viaStageId: plan.viaStageId || null,
+      viaName: plan.viaName || null,
+    },
   };
+  if (plan.labels?.length) cfg.labels = plan.labels;
+  return cfg;
 }
 
 /** Apply a layout plan onto an existing X6 edge. Returns true if geometry changed. */
@@ -727,8 +992,8 @@ export function applyEdgePlan(edge, plan) {
   const next = plan.vertices || [];
   const prevSrc = edge.getSource?.() || {};
   const prevTgt = edge.getTarget?.() || {};
-  const nextSrcPort = plan.sourcePort || 'out';
-  const nextTgtPort = plan.targetPort || 'in';
+  const nextSrcPort = plan.sourcePort || 'out0';
+  const nextTgtPort = plan.targetPort || 'in0';
   const vertsChanged =
     prev.length !== next.length ||
     prev.some(
@@ -744,14 +1009,26 @@ export function applyEdgePlan(edge, plan) {
   edge.setConnector(plan.connector);
   edge.setVertices(next);
   if (plan.attrs) edge.setAttrs(plan.attrs);
+  if (plan.labels) edge.setLabels(plan.labels);
+  else edge.setLabels([]);
+  edge.setData({
+    ...(edge.getData?.() || {}),
+    viaStageId: plan.viaStageId || null,
+    viaName: plan.viaName || null,
+  });
   return vertsChanged || portsChanged;
 }
 
 /**
  * Re-route edges for the current node positions without moving nodes.
- * Useful when opening a scene that already has coords.
  */
-export function routeEdgesForPositions(sceneGraph, rootId, nodeIds, positions, { isDark = false } = {}) {
+export function routeEdgesForPositions(
+  sceneGraph,
+  rootId,
+  nodeIds,
+  positions,
+  { isDark = false, nodeSizes = null, getName = null } = {}
+) {
   const ids = nodeIds?.length ? nodeIds : Object.keys(sceneGraph || {});
   const { outgoing } = buildAdjacency(sceneGraph, ids);
   const { ranks, orphans } = assignRanks(outgoing, ids, rootId);
@@ -759,10 +1036,29 @@ export function routeEdgesForPositions(sceneGraph, rootId, nodeIds, positions, {
     if (!ranks.has(id)) ranks.set(id, -1);
   });
   const rawEdges = collectEdges(outgoing, ranks);
-  return { edges: planEdges(rawEdges, positions, { isDark }), ranks };
+  return {
+    edges: planEdges(rawEdges, positions, { isDark, nodeSizes, getName }),
+    ranks,
+  };
 }
 
-/** Keep only edge plans whose source\0target key is in `visibleKeys`. */
+export function buildNodeSizes(ids, inCount, outCount, isTransitionFn) {
+  const map = new Map();
+  for (const id of ids) {
+    const ic = inCount?.get(id) || 0;
+    const oc = outCount?.get(id) || 0;
+    const isT = !!isTransitionFn?.(id);
+    map.set(id, {
+      width: nodeWidthForKind(isT),
+      height: nodeHeightForDegree(ic, oc, isT),
+      inCount: Math.max(1, ic),
+      outCount: Math.max(1, oc),
+      isTransition: isT,
+    });
+  }
+  return map;
+}
+
 export function filterEdgePlans(plans, visibleKeys) {
   if (!visibleKeys) return plans;
   return plans.filter((p) => visibleKeys.has(`${p.source}\0${p.target}`));

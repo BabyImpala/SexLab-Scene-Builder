@@ -6,10 +6,6 @@ import './SceneNode.css'
 const NODE_HEIGHT = 112;
 const NODE_WIDTH = 240;
 const START_COLOR = 'rgb(0, 88, 0)';
-const PORT_DEFAULTS = {
-  fill: 'rgb(201, 225, 195, 0.3)',
-  stroke: 'black',
-}
 
 function makeColor(r, g, b, a = 1) {
   return `rgba(${r}, ${g}, ${b}, ${a})`;
@@ -135,27 +131,25 @@ function NodeCtrlBtn({ label, onClick, danger, children }) {
 }
 
 function StageNode({ node, graph }) {
-  const stage = node.prop('stage');
+  const stage = node.prop('stage') || {};
   const start = node.prop('isStart');
   const fixedLen = node.prop('fixedLen');
+  const isTransition = !!node.prop('isTransition');
   const hubReturns = Number(node.prop('hubReturns') || 0);
   const poseFamilyLabel = node.prop('poseFamily');
 
   const label = stage.name;
-  const navText = stage.extra.nav_text;
+  const navText = stage.extra?.nav_text;
   const orgasm =
     !!node.prop('isOrgasm') ||
     !!(stage.positions && stage.positions.some((pos) => pos.climax || pos.extra?.climax));
-  const color = fixedLen ?
-    fixedLen < 50 ? makeColor(255, 175, 175, 1) :
-      makeColor(175, 235, 255, 1)
-    : undefined;
-
-  // Mutating ports during render desyncs edge anchors on WebKitGTK.
-  useEffect(() => {
-    node.prop('ports/groups/out/attrs/path/stroke', start ? START_COLOR : PORT_DEFAULTS.stroke);
-    node.prop('ports/groups/out/attrs/path/fill', color ? color : PORT_DEFAULTS.fill);
-  }, [node, start, color]);
+  const color = isTransition
+    ? makeColor(196, 155, 90, 1)
+    : fixedLen
+      ? fixedLen < 50
+        ? makeColor(255, 175, 175, 1)
+        : makeColor(175, 235, 255, 1)
+      : undefined;
 
   const editStage = () => graph.emit("node:edit", { node });
   const cloneStage = () => graph.emit("node:clone", { node });
@@ -163,15 +157,25 @@ function StageNode({ node, graph }) {
 
   return (
     <div
-      className="stage-content"
+      className={`stage-content${isTransition ? ' stage-transition' : ''}`}
       style={{
         backgroundColor: color,
-        borderColor: start ? START_COLOR : undefined,
+        borderColor: start ? START_COLOR : isTransition ? 'rgba(120, 80, 20, 0.55)' : undefined,
       }}
     >
       <div className="node-header">
         <StatusIconRow
           items={[
+            isTransition
+              ? {
+                  title: 'Transition stage',
+                  icon: (
+                    <span style={{ fontSize: 10, fontWeight: 700, color: makeColor(90, 55, 10) }}>
+                      T
+                    </span>
+                  ),
+                }
+              : null,
             start
               ? {
                   title: 'Start Animation',
@@ -184,13 +188,13 @@ function StageNode({ node, graph }) {
                   icon: <HeartFilled style={{ fontSize: 20, color: makeColor(255, 20, 147) }} />,
                 }
               : null,
-            !navText && !start
+            !navText && !start && !isTransition
               ? {
                   title: 'Missing navigation text',
                   icon: <WarningOutlined style={{ fontSize: 20, color: makeColor(255, 0, 0) }} />,
                 }
               : null,
-            fixedLen
+            fixedLen && !isTransition
               ? {
                   title: 'Fixed Length',
                   icon: <FixedLength style={{ fontSize: 20, color: makeColor(0, 191, 255) }} />,
@@ -238,6 +242,70 @@ function StageNode({ node, graph }) {
   );
 }
 
+const SLOT_STEP = 28;
+const TRANSITION_WIDTH = 200;
+const TRANSITION_HEIGHT = 88;
+
+export function nodeHeightForDegree(inCount, outCount, isTransition = false) {
+  const base = isTransition ? TRANSITION_HEIGHT : NODE_HEIGHT;
+  const slots = Math.max(1, Number(inCount) || 0, Number(outCount) || 0);
+  return base + Math.max(0, slots - 1) * SLOT_STEP;
+}
+
+export function nodeWidthForKind(isTransition = false) {
+  return isTransition ? TRANSITION_WIDTH : NODE_WIDTH;
+}
+
+export function buildPortItems(inCount, outCount, width, height) {
+  const ins = Math.max(1, Number(inCount) || 1);
+  const outs = Math.max(1, Number(outCount) || 1);
+  const items = [];
+  for (let i = 0; i < outs; i++) {
+    const y = ((i + 1) / (outs + 1)) * height;
+    items.push({
+      id: `out${i}`,
+      group: 'out',
+      args: { x: width - 1, y },
+    });
+  }
+  for (let i = 0; i < ins; i++) {
+    const y = ((i + 1) / (ins + 1)) * height;
+    items.push({
+      id: `in${i}`,
+      group: 'in',
+      args: { x: 0, y },
+    });
+  }
+  items.push({ id: 'outLeft', group: 'outSide', args: { x: 1, y: height / 2 } });
+  items.push({ id: 'outTop', group: 'outSide', args: { x: width / 2, y: 1 } });
+  items.push({
+    id: 'outBottom',
+    group: 'outSide',
+    args: { x: width / 2, y: height - 1 },
+  });
+  items.push({
+    id: 'inRight',
+    group: 'in',
+    args: { x: width - 1, y: height / 2 },
+  });
+  items.push({ id: 'inTop', group: 'in', args: { x: width / 2, y: 1 } });
+  items.push({
+    id: 'inBottom',
+    group: 'in',
+    args: { x: width / 2, y: height - 1 },
+  });
+  return items;
+}
+
+export function applyNodeSlots(node, { inCount = 1, outCount = 1, isTransition = false } = {}) {
+  if (!node) return;
+  const w = nodeWidthForKind(isTransition);
+  const h = nodeHeightForDegree(inCount, outCount, isTransition);
+  node.prop('isTransition', isTransition);
+  node.resize(w, h);
+  node.prop('ports/items', buildPortItems(inCount, outCount, w, h));
+}
+
 register({
   shape: "stage_node",
   width: NODE_WIDTH,
@@ -245,14 +313,13 @@ register({
   ports: {
     groups: {
       out: {
-        markup: [{ tagName: 'path', selector: 'path' }],
+        markup: [{ tagName: 'circle', selector: 'circle' }],
         attrs: {
-          path: {
-            d: 'M 0 -40 L 10 0 L 0 40 z',
+          circle: {
+            r: 6,
             magnet: true,
-            stroke: PORT_DEFAULTS.stroke,
-            strokeWidth: 1,
-            fill: PORT_DEFAULTS.fill,
+            stroke: 'transparent',
+            fill: 'transparent',
           },
         },
         position: { name: 'absolute' },
@@ -261,7 +328,7 @@ register({
         markup: [{ tagName: 'circle', selector: 'circle' }],
         attrs: {
           circle: {
-            r: 3,
+            r: 6,
             magnet: true,
             stroke: 'transparent',
             fill: 'transparent',
@@ -273,7 +340,7 @@ register({
         markup: [{ tagName: 'circle', selector: 'circle' }],
         attrs: {
           circle: {
-            r: 4,
+            r: 6,
             magnet: true,
             stroke: 'transparent',
             fill: 'transparent',
@@ -282,31 +349,32 @@ register({
         position: { name: 'absolute' },
       },
     },
-    items: [
-      { id: 'out', group: 'out', args: { x: NODE_WIDTH - 1, y: NODE_HEIGHT / 2 } },
-      { id: 'in', group: 'in', args: { x: 0, y: NODE_HEIGHT / 2 } },
-      { id: 'outLeft', group: 'outSide', args: { x: 1, y: NODE_HEIGHT / 2 } },
-      { id: 'outTop', group: 'outSide', args: { x: NODE_WIDTH / 2, y: 1 } },
-      { id: 'outBottom', group: 'outSide', args: { x: NODE_WIDTH / 2, y: NODE_HEIGHT - 1 } },
-      { id: 'inRight', group: 'in', args: { x: NODE_WIDTH - 1, y: NODE_HEIGHT / 2 } },
-      { id: 'inTop', group: 'in', args: { x: NODE_WIDTH / 2, y: 1 } },
-      { id: 'inBottom', group: 'in', args: { x: NODE_WIDTH / 2, y: NODE_HEIGHT - 1 } },
-    ],
+    items: buildPortItems(1, 1, NODE_WIDTH, NODE_HEIGHT),
   },
-  effect: ['name', 'stage', 'scene', 'isOrgasm', 'fixedLen', 'isStart', 'hubReturns', 'poseFamily'],
+  effect: [
+    'name',
+    'stage',
+    'scene',
+    'isOrgasm',
+    'fixedLen',
+    'isStart',
+    'hubReturns',
+    'poseFamily',
+    'isTransition',
+  ],
   component: StageNode,
 });
 
-export { NODE_WIDTH, NODE_HEIGHT };
+export { NODE_WIDTH, NODE_HEIGHT, SLOT_STEP, TRANSITION_WIDTH, TRANSITION_HEIGHT };
 
 export const OUT_PORT_BY_SIDE = {
-  right: 'out',
+  right: 'out0',
   left: 'outLeft',
   top: 'outTop',
   bottom: 'outBottom',
 };
 export const IN_PORT_BY_SIDE = {
-  left: 'in',
+  left: 'in0',
   right: 'inRight',
   top: 'inTop',
   bottom: 'inBottom',
