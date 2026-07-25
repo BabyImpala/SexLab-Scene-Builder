@@ -19,9 +19,9 @@ const MAX_PER_COLUMN = 8;
 /** Clearance past the node edge before the first bend. */
 const STUB = 56;
 const STUB_STEP = 12;
-const LANE_GAP = 36;
-const BACK_LANE_GAP = 56;
-const TOP_LANE_GAP = 40;
+const LANE_GAP = 46;
+const BACK_LANE_GAP = 66;
+const TOP_LANE_GAP = 50;
 const SUBCOL_GAP = 48;
 /** Min orth segment so X6 rounded corners (r≈20) look clean. */
 const MIN_SEG = 48;
@@ -683,23 +683,34 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
   /** @type {Map<string, ReturnType<typeof LanePool>>} */
   const gutterPools = new Map();
   /** @type {Map<string, number>} */
+  const underAssigned = new Map();
+  /** @type {Map<string, number>} */
+  const overAssigned = new Map();
+  /** @type {Map<string, number>} */
+  const gutterAssigned = new Map();
+  /** @type {Map<string, number>} */
   const stubOutCount = new Map();
   /** @type {Map<string, number>} */
   const stubInCount = new Map();
 
-  const keyPair = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+  const edgeToken = (source, target) => `${source}\0${target}`;
   const slots = assignSlotPorts(rawEdges, getName);
 
-  const takeLocalUnder = (sp, tp, ss, ts) => {
+  const takeLocalUnder = (sp, tp, ss, ts, edgeToken) => {
     const b = pairBounds(sp, tp, ss, ts);
     const key = `u:${Math.round(b.maxY / 48)}:${Math.round((b.minX + b.maxX) / 240)}`;
     if (!localUnderPools.has(key)) {
       localUnderPools.set(key, LanePool(b.maxY + MIN_SEG, BACK_LANE_GAP));
     }
-    return { laneY: localUnderPools.get(key).take(), bounds: b };
+    const pool = localUnderPools.get(key);
+    const assignedKey = `${key}\0${edgeToken}`;
+    if (underAssigned.has(assignedKey)) return { laneY: underAssigned.get(assignedKey), bounds: b };
+    const laneY = pool.take();
+    underAssigned.set(assignedKey, laneY);
+    return { laneY, bounds: b };
   };
 
-  const takeLocalOver = (sp, tp, ss, ts) => {
+  const takeLocalOver = (sp, tp, ss, ts, edgeToken) => {
     const b = pairBounds(sp, tp, ss, ts);
     const key = `o:${Math.round(b.minY / 48)}:${Math.round((b.minX + b.maxX) / 240)}`;
     if (!localOverPools.has(key)) {
@@ -708,12 +719,22 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
         LanePool(Math.max(8, b.minY - MIN_SEG), -TOP_LANE_GAP)
       );
     }
-    return { laneY: localOverPools.get(key).take(), bounds: b };
+    const pool = localOverPools.get(key);
+    const assignedKey = `${key}\0${edgeToken}`;
+    if (overAssigned.has(assignedKey)) return { laneY: overAssigned.get(assignedKey), bounds: b };
+    const laneY = pool.take();
+    overAssigned.set(assignedKey, laneY);
+    return { laneY, bounds: b };
   };
 
-  const gutterLane = (key, baseX) => {
-    if (!gutterPools.has(key)) gutterPools.set(key, LanePool(baseX, LANE_GAP));
-    return gutterPools.get(key).take();
+  /** Corridor-shared gutters so parallel edges never reuse the same mid. */
+  const gutterLane = (corridorKey, base, edgeToken) => {
+    if (!gutterPools.has(corridorKey)) gutterPools.set(corridorKey, LanePool(base, LANE_GAP));
+    const assignedKey = `${corridorKey}\0${edgeToken}`;
+    if (gutterAssigned.has(assignedKey)) return gutterAssigned.get(assignedKey);
+    const v = gutterPools.get(corridorKey).take();
+    gutterAssigned.set(assignedKey, v);
+    return v;
   };
 
   const peekStub = (map, id, side) => {
@@ -775,8 +796,9 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
     const bounds = pairBounds(sp, tp, ss, ts);
     const preferRight = bounds.maxX + MIN_SEG;
     const preferLeft = bounds.minX - MIN_SEG;
-    const { laneY: underY } = takeLocalUnder(sp, tp, ss, ts);
-    const { laneY: overY } = takeLocalOver(sp, tp, ss, ts);
+    const token = edgeToken(edge.source, edge.target);
+    const { laneY: underY } = takeLocalUnder(sp, tp, ss, ts, token);
+    const { laneY: overY } = takeLocalOver(sp, tp, ss, ts, token);
 
     const planForSides = (outSide, inSide) => {
       const outMeta = peekStub(stubOutCount, edge.source, outSide);
@@ -901,15 +923,14 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
     if (chosen.outSide !== chosen.inSide) {
       const outVert =
         chosen.outSide === 'top' || chosen.outSide === 'bottom';
-      const midPrefer = outVert
-        ? gutterLane(
-            `vy:${keyPair(edge.source, edge.target)}:${Math.round((chosen.exit.y + chosen.enter.y) / 2)}`,
-            (chosen.exit.y + chosen.enter.y) / 2
-          )
-        : gutterLane(
-            `g:${keyPair(edge.source, edge.target)}:${Math.round((chosen.exit.x + chosen.enter.x) / 2)}`,
-            (chosen.exit.x + chosen.enter.x) / 2
-          );
+      const midBase = outVert
+        ? (chosen.exit.y + chosen.enter.y) / 2
+        : (chosen.exit.x + chosen.enter.x) / 2;
+      // Corridor key only (no edge pair) so parallel edges share one pool and get unique lanes.
+      const corridor = outVert
+        ? `vy:${Math.round(midBase / LANE_GAP)}`
+        : `g:${Math.round(midBase / LANE_GAP)}`;
+      const midPrefer = gutterLane(corridor, midBase, token);
       const routed = routeBetweenStubs(
         chosen.exit,
         chosen.enter,
@@ -982,6 +1003,14 @@ export function planToEdgeConfig(plan) {
     },
   };
   if (plan.labels?.length) cfg.labels = plan.labels;
+  const line = plan.attrs?.line ? { ...plan.attrs.line } : null;
+  if (line) {
+    if (line.targetMarker) line.targetMarker = { ...line.targetMarker };
+    line.strokeOpacity = 1;
+    line.opacity = 1;
+    cfg.layerBaseAttrs = { line };
+    cfg.layerDim = false;
+  }
   return cfg;
 }
 
@@ -1016,6 +1045,13 @@ export function applyEdgePlan(edge, plan) {
     viaStageId: plan.viaStageId || null,
     viaName: plan.viaName || null,
   });
+  // Pristine stroke for layer dim restore (X6 merges attrs; never capture dimmed live attrs).
+  const line = plan.attrs?.line ? { ...plan.attrs.line } : { ...(edge.attr('line') || {}) };
+  if (line.targetMarker) line.targetMarker = { ...line.targetMarker };
+  line.strokeOpacity = 1;
+  line.opacity = 1;
+  edge.setProp('layerBaseAttrs', { line });
+  edge.setProp('layerDim', false);
   return vertsChanged || portsChanged;
 }
 

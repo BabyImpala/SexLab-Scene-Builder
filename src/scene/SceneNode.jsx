@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import Icon, { EditOutlined, CopyOutlined, CloseOutlined, WarningOutlined, ArrowRightOutlined, HeartFilled } from '@ant-design/icons';
 import { register } from "@antv/x6-react-shape";
+import { uniqueStageLabel } from './stageFamily';
 import './SceneNode.css'
 
 const NODE_HEIGHT = 112;
@@ -137,8 +138,9 @@ function StageNode({ node, graph }) {
   const isTransition = !!node.prop('isTransition');
   const hubReturns = Number(node.prop('hubReturns') || 0);
   const poseFamilyLabel = node.prop('poseFamily');
+  const scene = node.prop('scene') || {};
 
-  const label = stage.name;
+  const label = uniqueStageLabel(stage, scene.stages || []) || stage.name;
   const navText = stage.extra?.nav_text;
   const orgasm =
     !!node.prop('isOrgasm') ||
@@ -230,7 +232,7 @@ function StageNode({ node, graph }) {
           </NodeCtrlBtn>
         </div>
       </div>
-      {poseFamilyLabel ? (
+      {poseFamilyLabel && !isTransition ? (
         <div style={{ fontSize: 10, opacity: 0.55, padding: '0 8px', marginTop: -2 }}>
           {poseFamilyLabel}
         </div>
@@ -244,7 +246,7 @@ function StageNode({ node, graph }) {
 
 const SLOT_STEP = 28;
 const TRANSITION_WIDTH = 200;
-const TRANSITION_HEIGHT = 88;
+const TRANSITION_HEIGHT = 72;
 
 export function nodeHeightForDegree(inCount, outCount, isTransition = false) {
   const base = isTransition ? TRANSITION_HEIGHT : NODE_HEIGHT;
@@ -361,6 +363,7 @@ register({
     'hubReturns',
     'poseFamily',
     'isTransition',
+    'displayName',
   ],
   component: StageNode,
 });

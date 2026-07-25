@@ -34,14 +34,19 @@ const FAMILY_ALIASES = {
 
 /**
  * Strip pack prefix and playback tags from a stage display name.
+ * Preserves a trailing `[disambiguator]` used for duplicate OStim titles.
  * @param {string} name
  * @returns {string}
  */
 export function cleanStageName(name) {
   let n = String(name || '');
+  const disambigMatch = n.match(/\s*\[[^\]]+\]\s*$/);
+  const disambig = disambigMatch ? disambigMatch[0].trim() : '';
+  if (disambigMatch) n = n.slice(0, -disambigMatch[0].length);
   n = n.replace(/^[^:]+:\s*/, ''); // "Lovemaking: " or similar pack prefix
   n = n.replace(/\|pb:.*$/i, '');
-  return n.trim();
+  n = n.trim();
+  return disambig ? `${n} ${disambig}` : n;
 }
 
 /**
@@ -109,6 +114,70 @@ export function isTransitionStage(stageOrName) {
     return /^Go to\s+/i.test(cleanStageName(stageOrName.name || ''));
   }
   return /^Go to\s+/i.test(cleanStageName(stageOrName));
+}
+
+/**
+ * Disambiguate duplicate stage titles in-place (common in OStim transitions).
+ * Returns true if any name changed.
+ */
+export function disambiguateDuplicateStageNames(stages = []) {
+  const byName = new Map();
+  for (const s of stages) {
+    if (!s) continue;
+    const n = s.name || '';
+    if (!byName.has(n)) byName.set(n, []);
+    byName.get(n).push(s);
+  }
+  let changed = false;
+  for (const list of byName.values()) {
+    if (list.length < 2) continue;
+    for (const s of list) {
+      const tags = s.tags || [];
+      const dest = tags.find((t) => /^ostim_dest:/i.test(String(t)));
+      const oid = tags.find((t) => /^ostim_id:/i.test(String(t)));
+      let suf = '';
+      if (dest) suf = String(dest).replace(/^ostim_dest:/i, '');
+      else if (oid) suf = String(oid).replace(/^ostim_id:/i, '');
+      else suf = String(s.id || '').slice(0, 8);
+      if (!suf) continue;
+      const bracket = `[${suf}]`;
+      if (s.name.includes(bracket)) continue;
+      // Insert before |pb: tags so cleanStageName can keep the suffix.
+      if (/\|pb:/i.test(s.name)) {
+        s.name = s.name.replace(/(\|pb:)/i, ` ${bracket}$1`);
+      } else {
+        s.name = `${s.name} ${bracket}`;
+      }
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
+ * Label helper for a single stage (reads already-disambiguated names, or
+ * computes a suffix when duplicates are still present).
+ */
+export function uniqueStageLabel(stage, stages = []) {
+  const name = stage?.name || '';
+  if (!name || !stages?.length) return name || 'Untitled';
+  const same = stages.filter((s) => s?.name === name);
+  if (same.length < 2) return name;
+  const tags = stage.tags || [];
+  const dest = tags.find((t) => /^ostim_dest:/i.test(String(t)));
+  const oid = tags.find((t) => /^ostim_id:/i.test(String(t)));
+  const suf = dest
+    ? String(dest).replace(/^ostim_dest:/i, '')
+    : oid
+      ? String(oid).replace(/^ostim_id:/i, '')
+      : String(stage.id || '').slice(0, 8);
+  if (!suf) return name;
+  const bracket = `[${suf}]`;
+  if (name.includes(bracket)) return name;
+  if (/\|pb:/i.test(name)) {
+    return name.replace(/(\|pb:)/i, ` ${bracket}$1`);
+  }
+  return `${name} ${bracket}`;
 }
 
 /**

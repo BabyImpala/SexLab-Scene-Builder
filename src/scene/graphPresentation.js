@@ -23,7 +23,18 @@ import {
   edgeLabelConfig,
   forwardEdgeAttrs,
 } from './SceneEdge';
+import { buildStageLookups, navMetaForEdge } from './edgeRanker';
 import './layoutPolicy.js';
+
+/**
+ * Prefer OStim nav description (e.g. "bow down"); never use icon/border.
+ */
+function viaEdgeLabelText(sourceStage, viaStage, viaName, ostimToStage) {
+  const meta = navMetaForEdge(sourceStage, viaStage, ostimToStage);
+  const desc = String(meta?.description || '').trim();
+  if (desc) return desc;
+  return shortTransitionLabel(viaName || viaStage?.name || '');
+}
 
 /**
  * Compact signature of topology + positions. Used to invalidate presentation cache.
@@ -97,18 +108,219 @@ export function resolveVisibleKeys({
 /**
  * Dim nodes outside the active family filter (cheap).
  */
+const LAYER_DIM_NODE = 0.4;
+const LAYER_DIM_EDGE_OPACITY = 0.4;
+const LAYER_DIM_EDGE_WIDTH = 1.25;
+
+function cloneLineAttrs(line) {
+  if (!line || typeof line !== 'object') return {};
+  const out = { ...line };
+  if (line.targetMarker && typeof line.targetMarker === 'object') {
+    out.targetMarker = { ...line.targetMarker };
+  }
+  if (line.sourceMarker && typeof line.sourceMarker === 'object') {
+    out.sourceMarker = { ...line.sourceMarker };
+  }
+  return out;
+}
+
+/** Restore full opacity — X6 merges attrs, so dim keys must be cleared explicitly. */
+function activeLineAttrs(base) {
+  const line = cloneLineAttrs(base);
+  line.strokeOpacity = 1;
+  line.opacity = 1;
+  if (line.strokeWidth == null) line.strokeWidth = 1.75;
+  return line;
+}
+
+function dimmedLineAttrs(base) {
+  const line = cloneLineAttrs(base);
+  line.strokeOpacity = LAYER_DIM_EDGE_OPACITY;
+  line.opacity = LAYER_DIM_EDGE_OPACITY;
+  line.strokeWidth = Math.min(Number(line.strokeWidth) || 1.75, LAYER_DIM_EDGE_WIDTH);
+  return line;
+}
+
 export function applyNodeFamilyDim(graph, families, familyFilter) {
   if (!graph) return;
   graph.getNodes().forEach((n) => {
     const pf = n.prop('poseFamily') || families?.get(n.id) || '';
-    const dim =
+    const familyDim =
       familyFilter && familyFilter !== 'all' && pf !== familyFilter;
+    const layerDim = !!n.prop('layerDim');
+    let opacity = 1;
+    if (layerDim) opacity = Math.min(opacity, LAYER_DIM_NODE);
+    if (familyDim) opacity = Math.min(opacity, 0.2);
     if (typeof n.setOpacity === 'function') {
-      n.setOpacity(dim ? 0.2 : 1);
+      n.setOpacity(opacity);
     } else {
-      n.attr('body/opacity', dim ? 0.2 : 1);
+      n.attr('body/opacity', opacity);
     }
   });
+}
+
+/**
+ * Dim/hide inactive graph layer for Poses / Transitions modes.
+ * Inactive nodes use setVisible(false) — WebKitGTK foreignObject ignores parent
+ * opacity, so setOpacity alone does not hide pose nodes reliably.
+ * `mode`: 'collapsed' | 'poses' | 'transitions'
+ */
+export function applyGraphLayerDim(graph, mode = 'collapsed') {
+  if (!graph) return;
+
+  const run = () => {
+    const wantTransitionActive = mode === 'transitions';
+    const layerOn = mode === 'poses' || mode === 'transitions';
+
+    graph.getNodes().forEach((n) => {
+      const isT = !!n.prop('isTransition');
+      const active = !layerOn || (wantTransitionActive ? isT : !isT);
+      n.setProp('layerDim', !active, { silent: true });
+      if (typeof n.setVisible === 'function') {
+        n.setVisible(active);
+      } else {
+        n.setProp('visible', active);
+      }
+      // Opacity as a soft fallback for non-WebKit; FO may ignore it.
+      if (typeof n.setOpacity === 'function') {
+        n.setOpacity(active ? 1 : LAYER_DIM_NODE);
+      }
+      n.setZIndex?.(active ? (layerOn ? 4 : 1) : 1);
+    });
+
+    graph.getEdges().forEach((e) => {
+      if (!layerOn) {
+        e.setProp('layerDim', false, { silent: true });
+        const base = e.prop('layerBaseAttrs')?.line;
+        e.attr('line', activeLineAttrs(base || e.attr('line') || {}));
+        e.setZIndex?.(0);
+        const filterShow = e.prop('filterVisible') !== false;
+        if (typeof e.setVisible === 'function') e.setVisible(filterShow);
+        else e.setProp('visible', filterShow);
+        return;
+      }
+
+      const s = e.getSourceCell();
+      const t = e.getTargetCell();
+      const sT = !!s?.prop?.('isTransition');
+      const tT = !!t?.prop?.('isTransition');
+      const touchesT = sT || tT;
+      const active = wantTransitionActive ? touchesT : !touchesT;
+      const wasDim = !!e.prop('layerDim');
+      const filterShow = e.prop('filterVisible') !== false;
+      const wantVisible = filterShow && active;
+
+      if (wasDim === !active) {
+        const vis =
+          typeof e.isVisible === 'function' ? e.isVisible() : e.prop('visible') !== false;
+        if (vis === wantVisible) return;
+      }
+
+      let base = e.prop('layerBaseAttrs')?.line;
+      if (!base) {
+        base = cloneLineAttrs(e.attr('line') || {});
+        base.strokeOpacity = 1;
+        base.opacity = 1;
+        e.setProp('layerBaseAttrs', { line: cloneLineAttrs(base) }, { silent: true });
+      }
+
+      e.setProp('layerDim', !active, { silent: true });
+      if (active) {
+        e.attr('line', activeLineAttrs(base));
+        e.setZIndex?.(3);
+      } else {
+        e.attr('line', dimmedLineAttrs(base));
+        e.setZIndex?.(0);
+      }
+      if (typeof e.setVisible === 'function') {
+        e.setVisible(wantVisible);
+      } else {
+        e.setProp('visible', wantVisible);
+      }
+    });
+  };
+
+  if (typeof graph.startBatch === 'function') {
+    graph.startBatch('layer-dim');
+    try {
+      run();
+    } finally {
+      graph.stopBatch('layer-dim');
+    }
+  } else {
+    run();
+  }
+}
+
+/**
+ * Place a node that isn't on the canvas yet (typical: transition stages after
+ * expanding from Collapsed). Prefer midpoint of placed neighbors over stored defaults.
+ */
+function midpointFromNeighbors(id, sceneGraph, placed) {
+  const g = sceneGraph?.[id] || {};
+  const neighborIds = [];
+  for (const [sid, node] of Object.entries(sceneGraph || {})) {
+    if ((node?.dest || []).includes(id)) neighborIds.push(sid);
+  }
+  for (const t of g.dest || []) neighborIds.push(t);
+
+  const pts = [];
+  for (const nid of neighborIds) {
+    const p = placed.get(nid);
+    if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) {
+      pts.push(p);
+      continue;
+    }
+    const ng = sceneGraph[nid] || {};
+    const nx = Number(ng.x);
+    const ny = Number(ng.y);
+    if (
+      Number.isFinite(nx) &&
+      Number.isFinite(ny) &&
+      !(nx === 40 && ny === 40) &&
+      !(nx === 0 && ny === 0)
+    ) {
+      pts.push({ x: nx, y: ny });
+    }
+  }
+  if (!pts.length) return null;
+  return {
+    x: pts.reduce((s, p) => s + p.x, 0) / pts.length,
+    y: pts.reduce((s, p) => s + p.y, 0) / pts.length,
+  };
+}
+
+function positionForMissingNode(id, sceneGraph, placed) {
+  const mid = midpointFromNeighbors(id, sceneGraph, placed);
+  if (mid) return mid;
+  const g = sceneGraph?.[id] || {};
+  const sx = Number(g.x);
+  const sy = Number(g.y);
+  return {
+    x: Number.isFinite(sx) ? sx : 40,
+    y: Number.isFinite(sy) ? sy : 40,
+  };
+}
+
+/** Nudge nodes that share nearly the same coordinates. */
+function nudgeOverlappingNodes(positions, ids) {
+  const list = ids.filter((id) => positions.has(id));
+  for (let i = 0; i < list.length; i++) {
+    const a = positions.get(list[i]);
+    if (!a) continue;
+    let slot = 0;
+    for (let j = i + 1; j < list.length; j++) {
+      const b = positions.get(list[j]);
+      if (!b) continue;
+      if (Math.abs(a.x - b.x) < 24 && Math.abs(a.y - b.y) < 24) {
+        slot += 1;
+        positions.set(list[j], {
+          x: a.x + slot * 56,
+          y: a.y + slot * 44,
+        });
+      }
+    }
+  }
 }
 
 /**
@@ -191,14 +403,31 @@ export function computeGraphPresentation({
     seededEdges = null;
     seededRanks = layout.ranks;
   } else {
-    positions =
-      existingPositions ||
-      new Map(
-        ids.map((id) => {
-          const g = viewGraph[id] || sceneGraph[id] || {};
-          return [id, { x: Number(g.x) || 40, y: Number(g.y) || 40 }];
-        })
-      );
+    const filled = new Map(existingPositions || []);
+    /** @type {Map<string, number>} */
+    const midOccupancy = new Map();
+    for (const id of ids) {
+      const cur = filled.get(id);
+      const isT = isTransitionStage(nameOf(id));
+      if (isT) {
+        const mid = midpointFromNeighbors(id, sceneGraph, filled);
+        if (mid) {
+          const key = `${Math.round(mid.x / 8)},${Math.round(mid.y / 8)}`;
+          const slot = midOccupancy.get(key) || 0;
+          midOccupancy.set(key, slot + 1);
+          filled.set(id, {
+            x: mid.x + slot * 56,
+            y: mid.y + slot * 44,
+          });
+        } else if (!cur) {
+          filled.set(id, positionForMissingNode(id, sceneGraph, filled));
+        }
+      } else if (!cur) {
+        filled.set(id, positionForMissingNode(id, sceneGraph, filled));
+      }
+    }
+    nudgeOverlappingNodes(filled, ids);
+    positions = filled;
     if (useCluster) {
       const clustered = layoutFamilyClusters(viewGraph, rootId, ids, {
         getName: nameOf,
@@ -229,6 +458,8 @@ export function computeGraphPresentation({
       .map((e) => [`${e.source}\0${e.target}`, e])
   );
 
+  const { byId: stageLookup, ostimToStage } = buildStageLookups(stages || []);
+
   const allEdges = (seededEdges || routed.edges).map((plan) => {
     const key = `${plan.source}\0${plan.target}`;
     const info = forest.edgeInfo.get(key);
@@ -242,7 +473,12 @@ export function computeGraphPresentation({
       viaName: via?.viaName || null,
     };
     if (via?.viaStageId) {
-      const label = shortTransitionLabel(via.viaName || via.viaStageId);
+      const label = viaEdgeLabelText(
+        stageLookup.get(plan.source),
+        stageLookup.get(via.viaStageId),
+        via.viaName || via.viaStageId,
+        ostimToStage
+      );
       return {
         ...base,
         attrs: viaEdgeAttrs(isDark),
@@ -258,6 +494,14 @@ export function computeGraphPresentation({
     const key = `${pe.source}\0${pe.target}`;
     if (plannedKeys.has(key)) continue;
     const via = pe.viaStageId;
+    const label = via
+      ? viaEdgeLabelText(
+          stageLookup.get(pe.source),
+          stageLookup.get(via),
+          pe.viaName,
+          ostimToStage
+        )
+      : '';
     allEdges.push({
       source: pe.source,
       target: pe.target,
@@ -268,9 +512,7 @@ export function computeGraphPresentation({
       connector: { name: 'rounded', args: { radius: 20 } },
       vertices: [],
       attrs: via ? viaEdgeAttrs(isDark) : forwardEdgeAttrs(isDark),
-      labels: via
-        ? edgeLabelConfig(shortTransitionLabel(pe.viaName), isDark)
-        : [],
+      labels: via ? edgeLabelConfig(label, isDark) : [],
       viaStageId: pe.viaStageId,
       viaName: pe.viaName,
       semanticRank: 'secondary',
@@ -334,10 +576,13 @@ export function applyEdgeVisibility(graph, visibleKeys) {
     const t = edge.getTargetCellId();
     const key = `${s}\0${t}`;
     const show = !visibleKeys || visibleKeys.has(key);
+    edge.setProp('filterVisible', show, { silent: true });
+    const layerDim = !!edge.prop('layerDim');
+    const visible = show && !layerDim;
     if (typeof edge.setVisible === 'function') {
-      edge.setVisible(show);
+      edge.setVisible(visible);
     } else {
-      edge.setProp('visible', show);
+      edge.setProp('visible', visible);
     }
   });
 }
