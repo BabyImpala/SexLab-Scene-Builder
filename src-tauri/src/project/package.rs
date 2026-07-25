@@ -91,6 +91,9 @@ pub struct Package {
     pub version: u8,
     #[serde(skip)]
     pub pack_path: PathBuf,
+    /// Folder used for OStim import; HKX clips are copied from here on SLSB export.
+    #[serde(skip)]
+    pub ostim_source: Option<PathBuf>,
 
     pub pack_name: String,
     pub pack_author: String,
@@ -105,6 +108,7 @@ impl Package {
         Self {
             version: VERSION, // current version
             pack_path: Default::default(),
+            ostim_source: None,
             pack_name: Default::default(),
             pack_author: Default::default(),
             pack_version: Default::default(),
@@ -217,14 +221,13 @@ impl Package {
         let path = app
             .dialog()
             .file()
-            .set_title("Import SLAL")
-            .add_filter("SLAL JSON", &["json"])
-            .blocking_pick_file()
-            .ok_or("No path to load slal file from".to_string())?
+            .set_title("Import SLAL pack (folder)")
+            .blocking_pick_folder()
+            .ok_or("No path to load SLAL pack from".to_string())?
             .into_path()
             .map_err(|e| e.to_string())?;
 
-        Package::from_slal(path).map(|prjct| *self = prjct)
+        Package::from_slal_pack(path).map(|prjct| *self = prjct)
     }
 
     pub fn load_ostim(&mut self, app: &tauri::AppHandle) -> Result<(), String> {
@@ -246,7 +249,7 @@ impl Package {
         let mut prjct = Package::new();
         prjct.pack_name = pack_name;
         prjct.scenes = scenes;
-        // Ensure PositionInfo / schema are current (import already builds v4-shaped data)
+        prjct.ostim_source = Some(path.clone());
         prjct.version = VERSION;
         println!(
             "Loaded {} SLSB scene(s) from {} OStim node(s) ({} transitions) in {} JSON file(s) under {}",
@@ -256,44 +259,46 @@ impl Package {
             summary.files_read,
             path.display()
         );
+        if summary.auto_transitions_linked > 0 || summary.auto_transitions_missing > 0 {
+            println!(
+                "autoTransitions: {} linked, {} missing destinations",
+                summary.auto_transitions_linked, summary.auto_transitions_missing
+            );
+        }
         Ok(prjct)
     }
 
-    /// Copy OStim `_N.hkx` clips into SexLab `_A#_S#` names under `dest_root`.
+    /// Copy OStim HKX clips into the export anim folder using stage event names.
     pub fn copy_ostim_hkx_for_slsb(
         &self,
         ostim_source: &Path,
         dest_root: &Path,
     ) -> Result<usize, String> {
-        let mut total = 0;
         let anim_dir = dest_root
             .join("meshes")
             .join("actors")
             .join("character")
             .join("animations")
             .join(self.fnis_mod_name());
-        for scene in self.scenes.values() {
-            for (si, stage) in scene.stages.iter().enumerate() {
-                let Some(event) = stage.positions.first().and_then(|p| p.event.first()) else {
-                    continue;
-                };
-                let Some(base) =
-                    crate::project::ostim::events::strip_actor_stage_suffix(event)
-                else {
-                    continue;
-                };
-                // Prefer OStim animation name without stage suffix for file search
-                let animation = base.clone();
-                total += crate::project::ostim::events::copy_ostim_hkx_to_slsb(
-                    ostim_source,
-                    &anim_dir,
-                    &animation,
-                    si + 1,
-                    scene.positions.len().max(1),
-                )?;
-            }
+        let events: Vec<String> = self
+            .scenes
+            .values()
+            .flat_map(|scene| scene.stages.iter())
+            .flat_map(|stage| stage.positions.iter())
+            .flat_map(|pos| pos.event.iter().cloned())
+            .collect();
+        let (copied, missing) = crate::project::ostim::events::copy_ostim_hkx_for_events(
+            ostim_source,
+            &anim_dir,
+            &events,
+        )?;
+        if missing > 0 {
+            println!(
+                "OStim HKX: copied {copied}, missing {missing} (searched under {})",
+                ostim_source.display()
+            );
         }
-        Ok(total)
+        Ok(copied)
     }
 
     pub fn enrich_from_slanim_source(
@@ -401,6 +406,56 @@ impl Package {
         }
         summary.unmatched_ids.sort();
         Ok(summary)
+    }
+
+    /// Import a SLAL pack folder: locate JSON, then auto-enrich FNIS lists and sources.txt.
+    pub fn from_slal_pack(dir: PathBuf) -> Result<Package, String> {
+        if !dir.is_dir() {
+            return Err(format!(
+                "SLAL pack path is not a folder: {}",
+                dir.display()
+            ));
+        }
+        let json_path = find_slal_json(&dir)?;
+        let mut prjct = Package::from_slal(json_path.clone())?;
+
+        let mut fnis_lists = Vec::new();
+        let mut source_files = Vec::new();
+        collect_slal_enrich_files(&dir, &mut fnis_lists, &mut source_files)?;
+
+        if !fnis_lists.is_empty() {
+            let summary = prjct.enrich_from_fnis_paths(&fnis_lists)?;
+            println!(
+                "FNIS enrich: {} list(s), {} event(s), {} position(s) updated, {} unmatched",
+                summary.files,
+                summary.animations_in_source,
+                summary.positions_updated,
+                summary.unmatched_ids.len()
+            );
+            if !summary.unmatched_ids.is_empty() && summary.unmatched_ids.len() <= 12 {
+                println!("  unmatched FNIS events: {:?}", summary.unmatched_ids);
+            }
+        }
+
+        if !source_files.is_empty() {
+            let summary = prjct.enrich_from_slanim_paths(&source_files)?;
+            println!(
+                "SLAnim sources enrich: {} file(s), {} anim(s), {} scene(s) enriched, {} unmatched",
+                summary.files,
+                summary.animations_in_source,
+                summary.scenes_enriched,
+                summary.unmatched_ids.len()
+            );
+        }
+
+        println!(
+            "SLAL pack import: JSON {}, FNIS lists {}, sources {} under {}",
+            json_path.display(),
+            fnis_lists.len(),
+            source_files.len(),
+            dir.display()
+        );
+        Ok(prjct)
     }
 
     pub fn from_slal(path: PathBuf) -> Result<Package, String> {
@@ -666,14 +721,32 @@ impl Package {
 
     pub fn export_into(&self, pack_root: &Path, kind: ExportKind) -> Result<(), String> {
         match kind {
-            ExportKind::Slsb => self.build(pack_root.to_path_buf()).map_err(|e| e.to_string()),
+            ExportKind::Slsb => {
+                self.build(pack_root.to_path_buf())
+                    .map_err(|e| e.to_string())?;
+                self.copy_ostim_hkx_after_export(pack_root)?;
+                Ok(())
+            }
             ExportKind::Slal => self.write_slal_pack(&pack_root.to_path_buf()),
             ExportKind::Both => {
-                self.build(pack_root.join("SLSB")).map_err(|e| e.to_string())?;
+                let slsb_root = pack_root.join("SLSB");
+                self.build(slsb_root.clone()).map_err(|e| e.to_string())?;
+                self.copy_ostim_hkx_after_export(&slsb_root)?;
                 self.write_slal_pack(&pack_root.join("SLAL"))
             }
-            ExportKind::Ostim => self.write_ostim_pack(pack_root, None),
+            ExportKind::Ostim => self.write_ostim_pack(pack_root, self.ostim_source.as_deref()),
         }
+    }
+
+    fn copy_ostim_hkx_after_export(&self, pack_root: &Path) -> Result<(), String> {
+        let Some(src) = self.ostim_source.as_ref() else {
+            return Ok(());
+        };
+        let n = self.copy_ostim_hkx_for_slsb(src, pack_root)?;
+        if n > 0 {
+            println!("Copied {n} OStim HKX clip(s) into {}", pack_root.display());
+        }
+        Ok(())
     }
 
     pub fn write_ostim_pack(
@@ -1001,6 +1074,145 @@ pub fn merge_dir_contents(src: &Path, dst: &Path) -> Result<(), std::io::Error> 
                 fs::create_dir_all(parent)?;
             }
             fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+fn json_has_animations_array(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_reader::<_, serde_json::Value>(BufReader::new(file)) else {
+        return false;
+    };
+    v.get("animations")
+        .and_then(|a| a.as_array())
+        .is_some_and(|a| !a.is_empty())
+}
+
+/// Prefer root `*.json`, then Registry Source `*.slsb.json`, then any nested SLAL JSON.
+fn find_slal_json(dir: &Path) -> Result<PathBuf, String> {
+    let mut root_candidates = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+                && json_has_animations_array(&path)
+            {
+                root_candidates.push(path);
+            }
+        }
+    }
+    if let Some(p) = root_candidates.into_iter().next() {
+        return Ok(p);
+    }
+
+    let registry = dir
+        .join("SKSE")
+        .join("SexLab")
+        .join("Registry")
+        .join("Source");
+    if registry.is_dir() {
+        if let Ok(entries) = fs::read_dir(&registry) {
+            let mut found = Vec::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if path.is_file()
+                    && (name.ends_with(".slsb.json") || name.ends_with(".json"))
+                    && json_has_animations_array(&path)
+                {
+                    found.push(path);
+                }
+            }
+            if let Some(p) = found.into_iter().next() {
+                return Ok(p);
+            }
+        }
+    }
+
+    let mut nested = Vec::new();
+    collect_json_with_animations(dir, &mut nested, 0)?;
+    nested
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            format!(
+                "No SLAL JSON with an animations array found under {}",
+                dir.display()
+            )
+        })
+}
+
+fn collect_json_with_animations(
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    depth: usize,
+) -> Result<(), String> {
+    if depth > 8 {
+        return Ok(());
+    }
+    let entries = fs::read_dir(dir).map_err(|e| e.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_json_with_animations(&path, out, depth + 1)?;
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+            && json_has_animations_array(&path)
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn collect_slal_enrich_files(
+    dir: &Path,
+    fnis_lists: &mut Vec<PathBuf>,
+    source_files: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    collect_slal_enrich_files_rec(dir, fnis_lists, source_files, 0)
+}
+
+fn collect_slal_enrich_files_rec(
+    dir: &Path,
+    fnis_lists: &mut Vec<PathBuf>,
+    source_files: &mut Vec<PathBuf>,
+    depth: usize,
+) -> Result<(), String> {
+    if depth > 10 {
+        return Ok(());
+    }
+    let entries = fs::read_dir(dir).map_err(|e| e.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_slal_enrich_files_rec(&path, fnis_lists, source_files, depth + 1)?;
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if name.starts_with("fnis_") && name.ends_with("_list.txt") {
+            fnis_lists.push(path);
+        } else if name == "sources.txt" || (name.contains("sources") && name.ends_with(".txt")) {
+            source_files.push(path);
         }
     }
     Ok(())
@@ -1929,6 +2141,63 @@ mod tests {
 
         let summary = pack.enrich_from_fnis_paths(&[list]).unwrap();
         assert_eq!(summary.positions_updated, 1);
+        let scene = pack.scenes.values().next().unwrap();
+        assert_eq!(
+            scene.stages[0].positions[0].anim_obj,
+            "AOChairA,AOShockyDogDildoB"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn from_slal_pack_auto_enriches_fnis_lists() {
+        let tmp = std::env::temp_dir().join(format!(
+            "slsb_slal_pack_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let json = tmp.join("pack.json");
+        fs::write(
+            &json,
+            r#"{
+  "name": "TestPack",
+  "animations": [
+    {
+      "name": "Chair Dildo",
+      "creature_race": "",
+      "tags": "Furniture",
+      "actors": [
+        {
+          "type": "female",
+          "stages": [
+            { "id": "yhd9B_Billyy_ChairDildo_A1_S1" }
+          ]
+        }
+      ]
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let anim_dir = tmp
+            .join("meshes")
+            .join("actors")
+            .join("character")
+            .join("animations")
+            .join("TestPack");
+        fs::create_dir_all(&anim_dir).unwrap();
+        fs::write(
+            anim_dir.join("FNIS_TestPack_List.txt"),
+            "s -o B_Billyy_ChairDildo_A1_S1 Chair.hkx AOChairA AOShockyDogDildoB\n",
+        )
+        .unwrap();
+
+        let pack = Package::from_slal_pack(tmp.clone()).unwrap();
+        assert_eq!(pack.pack_name, "TestPack");
+        assert_eq!(pack.scenes.len(), 1);
         let scene = pack.scenes.values().next().unwrap();
         assert_eq!(
             scene.stages[0].positions[0].anim_obj,
