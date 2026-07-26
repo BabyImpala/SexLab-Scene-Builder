@@ -49,7 +49,6 @@ import {
 } from "./scene/folderView"
 import {
   loadGlobalAssetLibrary,
-  mergeGlobalAssetLibrary,
   normalizeAssetLibrary,
   emptyAssetLibrary,
 } from "./common/assetLibrary"
@@ -1367,9 +1366,7 @@ function App() {
         if (hasGlobal) {
           invoke('set_asset_library', { library: global })
             .then((merged) => {
-              const next = normalizeAssetLibrary(merged);
-              setAssetLibrary(next);
-              mergeGlobalAssetLibrary(next);
+              setAssetLibrary(normalizeAssetLibrary(merged));
             })
             .catch((err) => console.error('Failed to seed asset library', err));
           setAssetLibrary(global);
@@ -1377,7 +1374,6 @@ function App() {
         }
       }
       setAssetLibrary(lib);
-      mergeGlobalAssetLibrary(lib);
     };
 
     const unlistenLib = listen('on_asset_library_update', (event) => {

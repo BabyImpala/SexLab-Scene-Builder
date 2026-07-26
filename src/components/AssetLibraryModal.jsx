@@ -129,8 +129,8 @@ export default function AssetLibraryModal({
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
           Autocomplete names for behavior files, anim/equip objects, and OStim
-          icons. Project entries are saved in the pack; global history is kept
-          in this browser for new projects.
+          icons. Project entries come from this pack (import / positions). Global
+          history only stores names you type or pick, for reuse in new projects.
         </Typography.Paragraph>
 
         <Segmented

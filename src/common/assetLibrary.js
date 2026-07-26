@@ -1,5 +1,6 @@
 const STORAGE_KEY = 'slsb.assetLibrary';
-const MAX_PER_LIST = 500;
+/** Soft cap for typed cross-project history only (not pack catalogs). */
+const MAX_PER_LIST = 1000;
 
 /** @typedef {{ events: string[], anim_objects: string[], equip_objects: string[], icons: string[] }} AssetLibrary */
 
@@ -19,6 +20,17 @@ function pushUnique(list, raw) {
   if (!trimmed) return false;
   const key = trimmed.toLowerCase();
   if (list.some((e) => String(e).toLowerCase() == key)) return false;
+  list.push(trimmed);
+  return true;
+}
+
+/** Insert or move to end so the soft cap keeps most-recently-used names. */
+function touchUnique(list, raw) {
+  const trimmed = normalizeStem(raw);
+  if (!trimmed) return false;
+  const key = trimmed.toLowerCase();
+  const idx = list.findIndex((e) => String(e).toLowerCase() === key);
+  if (idx >= 0) list.splice(idx, 1);
   list.push(trimmed);
   return true;
 }
@@ -62,25 +74,25 @@ export function loadGlobalAssetLibrary() {
 /** @param {AssetLibrary} lib */
 export function saveGlobalAssetLibrary(lib) {
   const next = {
-    events: capList(sortList(lib.events || [])),
-    anim_objects: capList(sortList(lib.anim_objects || [])),
-    equip_objects: capList(sortList(lib.equip_objects || [])),
-    icons: capList(sortList(lib.icons || [])),
+    events: capList([...(lib.events || [])]),
+    anim_objects: capList([...(lib.anim_objects || [])]),
+    equip_objects: capList([...(lib.equip_objects || [])]),
+    icons: capList([...(lib.icons || [])]),
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
   return next;
 }
 
 /**
- * Merge `incoming` into global history. Returns the updated global library.
+ * Merge into global typed history (MRU). Do not pass full project libraries.
  * @param {Partial<AssetLibrary>} incoming
  */
 export function mergeGlobalAssetLibrary(incoming = {}) {
   const cur = loadGlobalAssetLibrary();
-  for (const e of incoming.events || []) pushUnique(cur.events, e);
-  for (const e of incoming.anim_objects || []) pushUnique(cur.anim_objects, e);
-  for (const e of incoming.equip_objects || []) pushUnique(cur.equip_objects, e);
-  for (const e of incoming.icons || []) pushUnique(cur.icons, e);
+  for (const e of incoming.events || []) touchUnique(cur.events, e);
+  for (const e of incoming.anim_objects || []) touchUnique(cur.anim_objects, e);
+  for (const e of incoming.equip_objects || []) touchUnique(cur.equip_objects, e);
+  for (const e of incoming.icons || []) touchUnique(cur.icons, e);
   return saveGlobalAssetLibrary(cur);
 }
 
@@ -98,7 +110,7 @@ export function suggestAssetOptions(project, kind) {
 }
 
 /**
- * Remember one or more values into global history.
+ * Remember values into global typed history (MRU).
  * @param {'events'|'anim_objects'|'equip_objects'|'icons'} kind
  * @param {string|string[]} values
  */

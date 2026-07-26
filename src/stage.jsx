@@ -25,7 +25,6 @@ import { applyRootDarkClass, readOsDarkMode, writeStoredDarkMode } from "./commo
 import {
   normalizeAssetLibrary,
   rememberAssetValues,
-  mergeGlobalAssetLibrary,
 } from "./common/assetLibrary";
 
 const { Header, Content } = Layout;
@@ -80,7 +79,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     writeStoredDarkMode(initialDark);
     applyRootDarkClass(initialDark);
     const assetLibrary = normalizeAssetLibrary(asset_library);
-    mergeGlobalAssetLibrary(assetLibrary);
     if (!root) root = ReactDOM.createRoot(document.getElementById("root"));
     root.render(
       <React.StrictMode>
@@ -145,9 +143,7 @@ function Editor({ _sceneId, _stage, _positions, _initialDark, _assetLibrary }) {
 
   useEffect(() => {
     const unlisten = listen('on_asset_library_update', (event) => {
-      const next = normalizeAssetLibrary(event.payload);
-      setAssetLibrary(next);
-      mergeGlobalAssetLibrary(next);
+      setAssetLibrary(normalizeAssetLibrary(event.payload));
     });
     return () => {
       unlisten.then((f) => f());
