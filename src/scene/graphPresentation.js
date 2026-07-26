@@ -12,7 +12,12 @@ import {
 } from './graphLayoutClusters';
 import { buildFamilyMap, isTransitionStage } from './stageFamily';
 import { buildSpanningForest, layoutFromForest } from './spanningForest';
-import { primaryEdgeKeys } from './edgeRanker';
+import {
+  primaryEdgeKeys,
+  buildStageLookups,
+  navMetaForEdge,
+  parseNavText,
+} from './edgeRanker';
 import {
   buildCollapseProjection,
   degreeMaps,
@@ -20,16 +25,34 @@ import {
 } from './transitionCollapse';
 import {
   viaEdgeAttrs,
+  bridgeEdgeAttrs,
   edgeLabelConfig,
   forwardEdgeAttrs,
 } from './SceneEdge';
-import { buildStageLookups, navMetaForEdge } from './edgeRanker';
+import { NODE_HEIGHT, NODE_WIDTH } from './SceneNode';
+import {
+  buildFolderViewProjection,
+  isPortalNodeId,
+} from './folderView';
 import './layoutPolicy.js';
 
 /**
- * Prefer OStim nav description (e.g. "bow down"); never use icon/border.
+ * Label on a collapsed transition edge = that stage's NavText.
+ * OStim-encoded nav_text uses descriptions; freeform NavText is shown as-is.
  */
 function viaEdgeLabelText(sourceStage, viaStage, viaName, ostimToStage) {
+  const raw = String(viaStage?.extra?.nav_text || '').trim();
+  if (raw) {
+    const entries = parseNavText(raw);
+    if (entries.length) {
+      const descs = entries
+        .map((e) => String(e.description || '').trim())
+        .filter(Boolean);
+      if (descs.length) return descs.join(' · ');
+    } else {
+      return raw;
+    }
+  }
   const meta = navMetaForEdge(sourceStage, viaStage, ostimToStage);
   const desc = String(meta?.description || '').trim();
   if (desc) return desc;
@@ -60,6 +83,9 @@ export function resolveVisibleKeys({
   edgeMode,
   focusNodeIds = [],
   familyFilter = 'all',
+  folderFilter = 'all',
+  folderMap = null,
+  neighborhoodSet = null,
   forest,
   ranks = null,
 }) {
@@ -77,26 +103,49 @@ export function resolveVisibleKeys({
           edgeInfo: forest?.edgeInfo,
         });
 
-  if (familyFilter && familyFilter !== 'all') {
-    const filtered = new Set();
-    const allKeys = [];
-    for (const source of ids) {
-      for (const target of sceneGraph[source]?.dest || []) {
-        allKeys.push(`${source}\0${target}`);
-      }
+  const allKeys = [];
+  for (const source of ids) {
+    for (const target of sceneGraph[source]?.dest || []) {
+      allKeys.push(`${source}\0${target}`);
     }
-    const base = visibleKeys || new Set(allKeys);
+  }
+  let base = visibleKeys || new Set(allKeys);
+  const focus = new Set((focusNodeIds || []).filter(Boolean));
+
+  const inFolder = (id) => {
+    if (!folderFilter || folderFilter === 'all') return true;
+    const f = folderMap?.get(id) || '';
+    return f === folderFilter;
+  };
+  const inNeighborhood = (id) => {
+    if (!neighborhoodSet) return true;
+    return neighborhoodSet.has(id);
+  };
+
+  if (
+    (familyFilter && familyFilter !== 'all') ||
+    (folderFilter && folderFilter !== 'all') ||
+    neighborhoodSet
+  ) {
+    const filtered = new Set();
     for (const key of base) {
       const [s, t] = key.split('\0');
-      if (families.get(s) === familyFilter && families.get(t) === familyFilter) {
+      const familyOk =
+        !familyFilter ||
+        familyFilter === 'all' ||
+        (families.get(s) === familyFilter && families.get(t) === familyFilter);
+      const folderOk = inFolder(s) && inFolder(t);
+      const neighOk = inNeighborhood(s) && inNeighborhood(t);
+      if (familyOk && folderOk && neighOk) {
         filtered.add(key);
-      }
-    }
-    const focus = new Set((focusNodeIds || []).filter(Boolean));
-    if (focus.size && mode === 'neighborhood') {
-      for (const key of base) {
-        const [s, t] = key.split('\0');
-        if (focus.has(s) || focus.has(t)) filtered.add(key);
+      } else if (focus.size && (focus.has(s) || focus.has(t))) {
+        // Keep incident edges on the focused node when filters would hide them,
+        // unless neighborhood mode excludes the far endpoint.
+        if (!neighborhoodSet || (inNeighborhood(s) && inNeighborhood(t))) {
+          if (!folderFilter || folderFilter === 'all' || inFolder(s) || inFolder(t)) {
+            filtered.add(key);
+          }
+        }
       }
     }
     visibleKeys = filtered;
@@ -106,51 +155,28 @@ export function resolveVisibleKeys({
 }
 
 /**
- * Dim nodes outside the active family filter (cheap).
+ * Dim nodes outside active family / folder / neighborhood filters.
  */
-const LAYER_DIM_NODE = 0.4;
-const LAYER_DIM_EDGE_OPACITY = 0.4;
-const LAYER_DIM_EDGE_WIDTH = 1.25;
-
-function cloneLineAttrs(line) {
-  if (!line || typeof line !== 'object') return {};
-  const out = { ...line };
-  if (line.targetMarker && typeof line.targetMarker === 'object') {
-    out.targetMarker = { ...line.targetMarker };
-  }
-  if (line.sourceMarker && typeof line.sourceMarker === 'object') {
-    out.sourceMarker = { ...line.sourceMarker };
-  }
-  return out;
-}
-
-/** Restore full opacity — X6 merges attrs, so dim keys must be cleared explicitly. */
-function activeLineAttrs(base) {
-  const line = cloneLineAttrs(base);
-  line.strokeOpacity = 1;
-  line.opacity = 1;
-  if (line.strokeWidth == null) line.strokeWidth = 1.75;
-  return line;
-}
-
-function dimmedLineAttrs(base) {
-  const line = cloneLineAttrs(base);
-  line.strokeOpacity = LAYER_DIM_EDGE_OPACITY;
-  line.opacity = LAYER_DIM_EDGE_OPACITY;
-  line.strokeWidth = Math.min(Number(line.strokeWidth) || 1.75, LAYER_DIM_EDGE_WIDTH);
-  return line;
-}
-
-export function applyNodeFamilyDim(graph, families, familyFilter) {
+export function applyNodeFocusDim(
+  graph,
+  {
+    families = null,
+    familyFilter = 'all',
+    folderMap = null,
+    folderFilter = 'all',
+    neighborhoodSet = null,
+  } = {}
+) {
   if (!graph) return;
   graph.getNodes().forEach((n) => {
     const pf = n.prop('poseFamily') || families?.get(n.id) || '';
     const familyDim =
       familyFilter && familyFilter !== 'all' && pf !== familyFilter;
-    const layerDim = !!n.prop('layerDim');
-    let opacity = 1;
-    if (layerDim) opacity = Math.min(opacity, LAYER_DIM_NODE);
-    if (familyDim) opacity = Math.min(opacity, 0.2);
+    const folder = folderMap?.get(n.id) || n.prop('ostimFolder') || '';
+    const folderDim =
+      folderFilter && folderFilter !== 'all' && folder !== folderFilter;
+    const neighDim = neighborhoodSet && !neighborhoodSet.has(n.id);
+    const opacity = familyDim || folderDim || neighDim ? 0.18 : 1;
     if (typeof n.setOpacity === 'function') {
       n.setOpacity(opacity);
     } else {
@@ -159,97 +185,9 @@ export function applyNodeFamilyDim(graph, families, familyFilter) {
   });
 }
 
-/**
- * Dim/hide inactive graph layer for Poses / Transitions modes.
- * Inactive nodes use setVisible(false) — WebKitGTK foreignObject ignores parent
- * opacity, so setOpacity alone does not hide pose nodes reliably.
- * `mode`: 'collapsed' | 'poses' | 'transitions'
- */
-export function applyGraphLayerDim(graph, mode = 'collapsed') {
-  if (!graph) return;
-
-  const run = () => {
-    const wantTransitionActive = mode === 'transitions';
-    const layerOn = mode === 'poses' || mode === 'transitions';
-
-    graph.getNodes().forEach((n) => {
-      const isT = !!n.prop('isTransition');
-      const active = !layerOn || (wantTransitionActive ? isT : !isT);
-      n.setProp('layerDim', !active, { silent: true });
-      if (typeof n.setVisible === 'function') {
-        n.setVisible(active);
-      } else {
-        n.setProp('visible', active);
-      }
-      // Opacity as a soft fallback for non-WebKit; FO may ignore it.
-      if (typeof n.setOpacity === 'function') {
-        n.setOpacity(active ? 1 : LAYER_DIM_NODE);
-      }
-      n.setZIndex?.(active ? (layerOn ? 4 : 1) : 1);
-    });
-
-    graph.getEdges().forEach((e) => {
-      if (!layerOn) {
-        e.setProp('layerDim', false, { silent: true });
-        const base = e.prop('layerBaseAttrs')?.line;
-        e.attr('line', activeLineAttrs(base || e.attr('line') || {}));
-        e.setZIndex?.(0);
-        const filterShow = e.prop('filterVisible') !== false;
-        if (typeof e.setVisible === 'function') e.setVisible(filterShow);
-        else e.setProp('visible', filterShow);
-        return;
-      }
-
-      const s = e.getSourceCell();
-      const t = e.getTargetCell();
-      const sT = !!s?.prop?.('isTransition');
-      const tT = !!t?.prop?.('isTransition');
-      const touchesT = sT || tT;
-      const active = wantTransitionActive ? touchesT : !touchesT;
-      const wasDim = !!e.prop('layerDim');
-      const filterShow = e.prop('filterVisible') !== false;
-      const wantVisible = filterShow && active;
-
-      if (wasDim === !active) {
-        const vis =
-          typeof e.isVisible === 'function' ? e.isVisible() : e.prop('visible') !== false;
-        if (vis === wantVisible) return;
-      }
-
-      let base = e.prop('layerBaseAttrs')?.line;
-      if (!base) {
-        base = cloneLineAttrs(e.attr('line') || {});
-        base.strokeOpacity = 1;
-        base.opacity = 1;
-        e.setProp('layerBaseAttrs', { line: cloneLineAttrs(base) }, { silent: true });
-      }
-
-      e.setProp('layerDim', !active, { silent: true });
-      if (active) {
-        e.attr('line', activeLineAttrs(base));
-        e.setZIndex?.(3);
-      } else {
-        e.attr('line', dimmedLineAttrs(base));
-        e.setZIndex?.(0);
-      }
-      if (typeof e.setVisible === 'function') {
-        e.setVisible(wantVisible);
-      } else {
-        e.setProp('visible', wantVisible);
-      }
-    });
-  };
-
-  if (typeof graph.startBatch === 'function') {
-    graph.startBatch('layer-dim');
-    try {
-      run();
-    } finally {
-      graph.stopBatch('layer-dim');
-    }
-  } else {
-    run();
-  }
+/** @deprecated use applyNodeFocusDim */
+export function applyNodeFamilyDim(graph, families, familyFilter) {
+  applyNodeFocusDim(graph, { families, familyFilter });
 }
 
 /**
@@ -303,22 +241,38 @@ function positionForMissingNode(id, sceneGraph, placed) {
 }
 
 /** Nudge nodes that share nearly the same coordinates. */
-function nudgeOverlappingNodes(positions, ids) {
+function nudgeOverlappingNodes(positions, ids, nodeSizes = null) {
+  const heightOf = (id) =>
+    Math.max(NODE_HEIGHT, Number(nodeSizes?.get(id)?.height) || NODE_HEIGHT);
+  const widthOf = (id) =>
+    Math.max(NODE_WIDTH, Number(nodeSizes?.get(id)?.width) || NODE_WIDTH);
   const list = ids.filter((id) => positions.has(id));
+  // Stable top-to-bottom, left-to-right so we push later nodes down/right.
+  list.sort((a, b) => {
+    const pa = positions.get(a);
+    const pb = positions.get(b);
+    if (pa.y !== pb.y) return pa.y - pb.y;
+    return pa.x - pb.x;
+  });
   for (let i = 0; i < list.length; i++) {
-    const a = positions.get(list[i]);
+    const aId = list[i];
+    const a = positions.get(aId);
     if (!a) continue;
-    let slot = 0;
+    const ah = heightOf(aId);
+    const aw = widthOf(aId);
     for (let j = i + 1; j < list.length; j++) {
-      const b = positions.get(list[j]);
+      const bId = list[j];
+      const b = positions.get(bId);
       if (!b) continue;
-      if (Math.abs(a.x - b.x) < 24 && Math.abs(a.y - b.y) < 24) {
-        slot += 1;
-        positions.set(list[j], {
-          x: a.x + slot * 56,
-          y: a.y + slot * 44,
-        });
-      }
+      const bh = heightOf(bId);
+      const bw = widthOf(bId);
+      const overlapX = a.x < b.x + bw && a.x + aw > b.x;
+      const overlapY = a.y < b.y + bh && a.y + ah > b.y;
+      if (!overlapX || !overlapY) continue;
+      positions.set(bId, {
+        x: b.x,
+        y: a.y + ah + 56,
+      });
     }
   }
 }
@@ -335,6 +289,10 @@ export function computeGraphPresentation({
   isDark = false,
   edgeMode = null,
   focusNodeIds = [],
+  familyFilter = 'all',
+  folderFilter = 'all',
+  folderMap = null,
+  neighborhoodSet = null,
   preferCluster = null,
   existingPositions = null,
   rearrange = true,
@@ -352,16 +310,40 @@ export function computeGraphPresentation({
     enabled: !!collapseTransitions,
   });
 
-  const viewGraph = collapse.poseGraph;
-  const ids = collapse.visibleIds;
+  const folderView = buildFolderViewProjection({
+    poseGraph: collapse.poseGraph,
+    poseEdges: collapse.poseEdges,
+    folderFilter,
+    folderMap,
+    getName: nameOf,
+  });
+
+  const viewGraph = folderView.poseGraph;
+  const ids = folderView.visibleIds;
+  const nameOfView = (id) => {
+    if (isPortalNodeId(id)) {
+      const meta = folderView.portalMeta.get(id);
+      const folder = meta?.folder || '?';
+      const stageName = meta?.name || meta?.stageId || id;
+      return `→ ${folder}: ${stageName}`;
+    }
+    return nameOf(id);
+  };
   const useCluster =
     preferCluster == null ? shouldUseClusterLayout(ids.length) : !!preferCluster;
   const filterMode = edgeMode ?? (useCluster ? 'neighborhood' : 'all');
 
   const forest = buildSpanningForest(viewGraph, rootId, ids, {
-    getName: nameOf,
+    getName: nameOfView,
     stages,
   });
+
+  const { inCount, outCount } = degreeMaps(viewGraph);
+  const stageById = new Map((stages || []).map((s) => [s.id, s]));
+  const nodeSizes = buildNodeSizes(ids, inCount, outCount, (id) =>
+    isPortalNodeId(id) ||
+    isTransitionStage(stageById.get(id) || nameOf(id))
+  );
 
   let positions;
   let families = forest.families;
@@ -376,6 +358,7 @@ export function computeGraphPresentation({
       children: forest.children,
       roots: forest.roots,
       getName: nameOf,
+      nodeSizes,
     });
     families = forest.families;
   } else if (rearrange && useCluster) {
@@ -397,7 +380,10 @@ export function computeGraphPresentation({
         y: 0,
       };
     }
-    const layout = layoutSceneGraph(treeGraph, rootId, ids, { isDark });
+    const layout = layoutSceneGraph(treeGraph, rootId, ids, {
+      isDark,
+      nodeSizes,
+    });
     positions = layout.positions;
     families = forest.families || buildFamilyMap(ids, nameOf);
     seededEdges = null;
@@ -426,7 +412,7 @@ export function computeGraphPresentation({
         filled.set(id, positionForMissingNode(id, sceneGraph, filled));
       }
     }
-    nudgeOverlappingNodes(filled, ids);
+    nudgeOverlappingNodes(filled, ids, nodeSizes);
     positions = filled;
     if (useCluster) {
       const clustered = layoutFamilyClusters(viewGraph, rootId, ids, {
@@ -440,43 +426,65 @@ export function computeGraphPresentation({
     }
   }
 
-  const { inCount, outCount } = degreeMaps(viewGraph);
-  const stageById = new Map((stages || []).map((s) => [s.id, s]));
-  const nodeSizes = buildNodeSizes(ids, inCount, outCount, (id) =>
-    isTransitionStage(stageById.get(id) || nameOf(id))
-  );
-
   const routed = routeEdgesForPositions(viewGraph, rootId, ids, positions, {
     isDark,
     nodeSizes,
-    getName: nameOf,
+    getName: nameOfView,
   });
 
-  const viaByKey = new Map(
-    collapse.poseEdges
-      .filter((e) => e.viaStageId)
-      .map((e) => [`${e.source}\0${e.target}`, e])
+  // Prefer folder-view edge list (includes portals); fall back to collapse.
+  const viewPoseEdges = folderView.poseEdges || collapse.poseEdges;
+  const edgeMetaByKey = new Map(
+    viewPoseEdges.map((e) => [`${e.source}\0${e.target}`, e])
   );
 
   const { byId: stageLookup, ostimToStage } = buildStageLookups(stages || []);
 
-  const allEdges = (seededEdges || routed.edges).map((plan) => {
+  const decoratePlan = (plan, meta) => {
     const key = `${plan.source}\0${plan.target}`;
     const info = forest.edgeInfo.get(key);
-    const via = viaByKey.get(key);
+    const viaStageId = meta?.viaStageId || null;
+    const viaName = meta?.viaName || null;
+    const bridgeTargetId = meta?.bridgeTargetId || null;
+    const bridgeSourceId = meta?.bridgeSourceId || null;
+    const bridgeFolder = meta?.bridgeFolder || null;
+    const isBridge = !!(bridgeTargetId || bridgeSourceId || meta?.kind === 'bridge');
     const base = {
       ...plan,
       semanticRank: info?.rank || 'secondary',
       semanticScore: info?.score ?? 0,
       inTree: forest.treeKeys.has(key),
-      viaStageId: via?.viaStageId || null,
-      viaName: via?.viaName || null,
+      viaStageId,
+      viaName,
+      bridgeTargetId,
+      bridgeSourceId,
+      bridgeFolder,
     };
-    if (via?.viaStageId) {
+    if (isBridge) {
+      const destName = bridgeTargetId
+        ? nameOf(bridgeTargetId)
+        : bridgeSourceId
+          ? nameOf(bridgeSourceId)
+          : '';
+      const label = bridgeFolder
+        ? `→ ${bridgeFolder}${destName ? `: ${destName}` : ''}`
+        : destName
+          ? `→ ${destName}`
+          : '→ other folder';
+      return {
+        ...base,
+        attrs: bridgeEdgeAttrs(isDark),
+        labels: edgeLabelConfig(label, isDark),
+        kind: 'bridge',
+      };
+    }
+    if (viaStageId) {
       const label = viaEdgeLabelText(
-        stageLookup.get(plan.source),
-        stageLookup.get(via.viaStageId),
-        via.viaName || via.viaStageId,
+        stageLookup.get(
+          isPortalNodeId(plan.source) ? bridgeSourceId : plan.source
+        ),
+        stageLookup.get(viaStageId),
+        viaName || viaStageId,
         ostimToStage
       );
       return {
@@ -487,54 +495,57 @@ export function computeGraphPresentation({
       };
     }
     return base;
+  };
+
+  const allEdges = (seededEdges || routed.edges).map((plan) => {
+    const key = `${plan.source}\0${plan.target}`;
+    return decoratePlan(plan, edgeMetaByKey.get(key));
   });
 
   const plannedKeys = new Set(allEdges.map((e) => `${e.source}\0${e.target}`));
-  for (const pe of collapse.poseEdges) {
+  for (const pe of viewPoseEdges) {
     const key = `${pe.source}\0${pe.target}`;
     if (plannedKeys.has(key)) continue;
-    const via = pe.viaStageId;
-    const label = via
-      ? viaEdgeLabelText(
-          stageLookup.get(pe.source),
-          stageLookup.get(via),
-          pe.viaName,
-          ostimToStage
-        )
-      : '';
-    allEdges.push({
-      source: pe.source,
-      target: pe.target,
-      kind: via ? 'via' : 'forward',
-      sourcePort: 'out0',
-      targetPort: 'in0',
-      router: { name: 'normal' },
-      connector: { name: 'rounded', args: { radius: 20 } },
-      vertices: [],
-      attrs: via ? viaEdgeAttrs(isDark) : forwardEdgeAttrs(isDark),
-      labels: via ? edgeLabelConfig(label, isDark) : [],
-      viaStageId: pe.viaStageId,
-      viaName: pe.viaName,
-      semanticRank: 'secondary',
-      semanticScore: 0,
-      inTree: false,
-    });
+    allEdges.push(
+      decoratePlan(
+        {
+          source: pe.source,
+          target: pe.target,
+          kind: 'forward',
+          sourcePort: 'out0',
+          targetPort: 'in0',
+          router: { name: 'normal' },
+          connector: { name: 'rounded', args: { radius: 20 } },
+          vertices: [],
+          attrs: forwardEdgeAttrs(isDark),
+          labels: [],
+          slotOut: 'out0',
+          slotIn: 'in0',
+        },
+        pe
+      )
+    );
   }
 
   const ranks = seededRanks || routed.ranks;
 
+  // Folder is structural (virtual canvas); do not also dim/filter by folder.
   const { visibleKeys } = resolveVisibleKeys({
     sceneGraph: viewGraph,
     nodeIds: ids,
     edgeMode: filterMode,
     focusNodeIds,
+    familyFilter,
+    folderFilter: folderView.active ? 'all' : folderFilter,
+    folderMap,
+    neighborhoodSet,
     forest,
     ranks,
   });
 
   const connectionRows = buildRows
     ? buildConnectionRows(viewGraph, ids, {
-        getName: nameOf,
+        getName: nameOfView,
         families,
         ranks,
         edgeInfo: forest.edgeInfo,
@@ -560,7 +571,10 @@ export function computeGraphPresentation({
     primaryKeys: primaryEdgeKeys(forest.edgeInfo),
     signature: sceneGraphSignature(sceneGraph),
     collapse,
+    folderView,
     visibleIds: ids,
+    realIds: folderView.realIds || ids,
+    portalMeta: folderView.portalMeta,
     hiddenIds: collapse.hiddenIds,
     inCount,
     outCount,
@@ -572,17 +586,36 @@ export function computeGraphPresentation({
 export function applyEdgeVisibility(graph, visibleKeys) {
   if (!graph) return;
   graph.getEdges().forEach((edge) => {
+    // Preview / half-connected edges must stay visible during click-to-connect.
+    if (edge.getData?.()?.preview) {
+      if (typeof edge.setVisible === 'function') edge.setVisible(true);
+      else edge.setProp('visible', true);
+      edge.setProp('filterVisible', true, { silent: true });
+      return;
+    }
     const s = edge.getSourceCellId();
     const t = edge.getTargetCellId();
+    if (!s || !t) {
+      if (typeof edge.setVisible === 'function') edge.setVisible(true);
+      else edge.setProp('visible', true);
+      edge.setProp('filterVisible', true, { silent: true });
+      return;
+    }
     const key = `${s}\0${t}`;
-    const show = !visibleKeys || visibleKeys.has(key);
+    // null / undefined = show all (folder canvases remount a subset already).
+    const show = visibleKeys == null || visibleKeys.has(key);
     edge.setProp('filterVisible', show, { silent: true });
-    const layerDim = !!edge.prop('layerDim');
-    const visible = show && !layerDim;
     if (typeof edge.setVisible === 'function') {
-      edge.setVisible(visible);
+      edge.setVisible(show);
     } else {
-      edge.setProp('visible', visible);
+      edge.setProp('visible', show);
+    }
+    // X6 can leave opacity/display stuck after setVisible(false) across remounts.
+    if (show) {
+      try {
+        edge.attr('line/opacity', 1);
+        edge.attr('line/strokeOpacity', 1);
+      } catch (_) { /* ignore */ }
     }
   });
 }

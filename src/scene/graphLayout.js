@@ -1,8 +1,10 @@
 import {
   NODE_WIDTH,
   NODE_HEIGHT,
-  OUT_PORT_BY_SIDE,
-  IN_PORT_BY_SIDE,
+  outPortId,
+  inPortId,
+  parsePortRef,
+  portArgsOnNode,
   nodeHeightForDegree,
   nodeWidthForKind,
 } from './SceneNode';
@@ -114,11 +116,14 @@ function orderByBarycenter(byLevel, outgoing, incoming) {
   }
 }
 
-function placeNodes(byLevel, orphans, nodeIds, ranks) {
+function placeNodes(byLevel, orphans, nodeIds, ranks, nodeSizes = null) {
   const large = nodeIds.length > 40;
   const hGap = large ? 500 : 400;
   const vGap = large ? 220 : 190;
+  const clearance = large ? 48 : 56;
   const maxCol = large ? MAX_PER_COLUMN : Math.max(MAX_PER_COLUMN, 12);
+  const heightOf = (id) =>
+    Math.max(NODE_HEIGHT, Number(nodeSizes?.get(id)?.height) || NODE_HEIGHT);
 
   const ordered = [];
   for (const [, ids] of [...byLevel.entries()].sort((a, b) => a[0] - b[0])) {
@@ -133,12 +138,26 @@ function placeNodes(byLevel, orphans, nodeIds, ranks) {
   const positions = new Map();
 
   if (linear && ordered.length > MAX_STAGES_PER_ROW) {
+    const rowY = [];
     ordered.forEach((id, i) => {
       const row = Math.floor(i / MAX_STAGES_PER_ROW);
       const col = i % MAX_STAGES_PER_ROW;
+      if (rowY[row] == null) {
+        rowY[row] =
+          row === 0
+            ? ORIGIN
+            : rowY[row - 1] +
+              Math.max(
+                ...ordered
+                  .slice((row - 1) * MAX_STAGES_PER_ROW, row * MAX_STAGES_PER_ROW)
+                  .map((oid) => heightOf(oid)),
+                NODE_HEIGHT
+              ) +
+              clearance;
+      }
       positions.set(id, {
         x: ORIGIN + col * hGap,
-        y: ORIGIN + row * vGap,
+        y: rowY[row],
       });
     });
     return { positions, hGap, vGap };
@@ -147,30 +166,42 @@ function placeNodes(byLevel, orphans, nodeIds, ranks) {
   let xCursor = ORIGIN;
   for (const [, ids] of [...byLevel.entries()].sort((a, b) => a[0] - b[0])) {
     const subCols = Math.max(1, Math.ceil(ids.length / maxCol));
+    const subY = Array.from({ length: subCols }, () => ORIGIN);
     ids.forEach((id, i) => {
       const sub = Math.floor(i / maxCol);
-      const row = i % maxCol;
       positions.set(id, {
         x: xCursor + sub * (NODE_WIDTH + SUBCOL_GAP),
-        y: ORIGIN + row * vGap,
+        y: subY[sub],
       });
+      subY[sub] += heightOf(id) + clearance;
     });
     xCursor += Math.max(hGap, subCols * (NODE_WIDTH + SUBCOL_GAP) + 56);
   }
 
   if (orphans.length) {
-    const maxRows = Math.max(
-      1,
-      ...[...byLevel.values()].map((ids) => Math.min(ids.length, maxCol)),
+    const maxY = Math.max(
+      ORIGIN,
+      ...[...positions.entries()].map(([id, p]) => p.y + heightOf(id)),
       0
     );
-    const orphanY = ORIGIN + maxRows * vGap + vGap;
+    const orphanY = maxY + vGap;
+    const orphanRowY = [orphanY];
     orphans.forEach((id, i) => {
       const row = Math.floor(i / MAX_STAGES_PER_ROW);
       const col = i % MAX_STAGES_PER_ROW;
+      if (orphanRowY[row] == null) {
+        const prevIds = orphans.slice(
+          (row - 1) * MAX_STAGES_PER_ROW,
+          row * MAX_STAGES_PER_ROW
+        );
+        orphanRowY[row] =
+          orphanRowY[row - 1] +
+          Math.max(...prevIds.map((oid) => heightOf(oid)), NODE_HEIGHT) +
+          clearance;
+      }
       positions.set(id, {
         x: ORIGIN + col * hGap,
-        y: orphanY + row * vGap,
+        y: orphanRowY[row],
       });
       if (!ranks.has(id)) ranks.set(id, -1);
     });
@@ -200,16 +231,20 @@ function sizeOf(nodeSizes, id) {
   );
 }
 
-function slotAxisY(pos, size, portId, role) {
-  const h = size.height || NODE_HEIGHT;
-  const m = String(portId || '').match(/^(?:in|out)(\d+)$/);
-  if (!m) return portY(pos, size);
-  const idx = Number(m[1]);
-  const count = Math.max(
-    1,
-    role === 'out' ? size.outCount || 1 : size.inCount || 1
+function slotAxisPoint(pos, size, portId) {
+  const ref = parsePortRef(portId);
+  const w = size?.width || NODE_WIDTH;
+  const h = size?.height || NODE_HEIGHT;
+  const args = portArgsOnNode(
+    ref.side,
+    ref.role,
+    ref.index,
+    size?.inCount || 1,
+    size?.outCount || 1,
+    w,
+    h
   );
-  return pos.y + ((idx + 1) / (count + 1)) * h;
+  return { x: pos.x + args.x, y: pos.y + args.y, ...ref };
 }
 
 /**
@@ -238,7 +273,7 @@ function chooseSides(sp, tp, ss, ts) {
   };
 }
 
-/** Stub just outside a node side. */
+/** Stub just outside a node side, anchored to a unique per-edge port. */
 function sideStub(pos, side, stub, along = 0, role = 'out', size = null, portOverride = null) {
   const s = size || {
     width: NODE_WIDTH,
@@ -246,26 +281,23 @@ function sideStub(pos, side, stub, along = 0, role = 'out', size = null, portOve
     inCount: 1,
     outCount: 1,
   };
+  const port =
+    portOverride ||
+    (role === 'out' ? outPortId(side, 0) : inPortId(side, 0));
+  const anchor = slotAxisPoint(pos, s, port);
   const w = s.width || NODE_WIDTH;
   const h = s.height || NODE_HEIGHT;
-  const ports = role === 'out' ? OUT_PORT_BY_SIDE : IN_PORT_BY_SIDE;
-  const port = portOverride || ports[side] || ports.right;
-  const cy =
-    side === 'left' || side === 'right'
-      ? slotAxisY(pos, s, port, role)
-      : portY(pos, s);
-  const cx = portX(pos, s);
   switch (side) {
     case 'left':
-      return { x: pos.x - stub, y: cy + along, port };
+      return { x: pos.x - stub, y: anchor.y + along, port };
     case 'right':
-      return { x: pos.x + w + stub, y: cy + along, port };
+      return { x: pos.x + w + stub, y: anchor.y + along, port };
     case 'top':
-      return { x: cx + along, y: pos.y - stub, port };
+      return { x: anchor.x + along, y: pos.y - stub, port };
     case 'bottom':
-      return { x: cx + along, y: pos.y + h + stub, port };
+      return { x: anchor.x + along, y: pos.y + h + stub, port };
     default:
-      return { x: pos.x + w + stub, y: cy + along, port };
+      return { x: pos.x + w + stub, y: anchor.y + along, port };
   }
 }
 
@@ -287,7 +319,7 @@ function assignSlotPorts(edges, getName) {
   for (const [, list] of inns) {
     list.sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
   }
-  /** @type {Map<string, { out: string, in: string }>} */
+  /** @type {Map<string, { out: string, in: string, outIndex: number, inIndex: number }>} */
   const slots = new Map();
   for (const e of edges) {
     const oi = Math.max(0, outs.get(e.source).indexOf(e.target));
@@ -295,6 +327,8 @@ function assignSlotPorts(edges, getName) {
     slots.set(`${e.source}\0${e.target}`, {
       out: `out${oi}`,
       in: `in${ii}`,
+      outIndex: oi,
+      inIndex: ii,
     });
   }
   return slots;
@@ -681,7 +715,12 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
   /** @type {Map<string, ReturnType<typeof LanePool>>} */
   const localOverPools = new Map();
   /** @type {Map<string, ReturnType<typeof LanePool>>} */
-  const gutterPools = new Map();
+  const sideWrapPools = new Map();
+  /** Mid X (vertical gutters) and mid Y (horizontal gutters) already taken. */
+  /** @type {number[]} */
+  const takenGutterMidsX = [];
+  /** @type {number[]} */
+  const takenGutterMidsY = [];
   /** @type {Map<string, number>} */
   const underAssigned = new Map();
   /** @type {Map<string, number>} */
@@ -727,12 +766,34 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
     return { laneY, bounds: b };
   };
 
-  /** Corridor-shared gutters so parallel edges never reuse the same mid. */
-  const gutterLane = (corridorKey, base, edgeToken) => {
-    if (!gutterPools.has(corridorKey)) gutterPools.set(corridorKey, LanePool(base, LANE_GAP));
-    const assignedKey = `${corridorKey}\0${edgeToken}`;
+  const takeSideWrap = (side, prefer, edgeToken) => {
+    const key = `s:${side}:${Math.round(prefer / 48)}`;
+    if (!sideWrapPools.has(key)) {
+      sideWrapPools.set(key, LanePool(prefer, side === 'left' ? -LANE_GAP : LANE_GAP));
+    }
+    const assignedKey = `${key}\0${edgeToken}`;
     if (gutterAssigned.has(assignedKey)) return gutterAssigned.get(assignedKey);
-    const v = gutterPools.get(corridorKey).take();
+    const v = sideWrapPools.get(key).take();
+    gutterAssigned.set(assignedKey, v);
+    return v;
+  };
+
+  /**
+   * Global mid spacing so adjacent corridor buckets cannot land ~20px apart.
+   * Vertical gutters (right↔left Z) use X; horizontal gutters use Y.
+   */
+  const takeGutterMid = (prefer, axis, edgeToken) => {
+    const assignedKey = `${axis}:${edgeToken}`;
+    if (gutterAssigned.has(assignedKey)) return gutterAssigned.get(assignedKey);
+    const taken = axis === 'x' ? takenGutterMidsX : takenGutterMidsY;
+    let v = prefer;
+    for (let n = 0; n < 48; n++) {
+      const ok = taken.every((t) => Math.abs(t - v) >= LANE_GAP * 0.9);
+      if (ok) break;
+      const step = Math.ceil((n + 1) / 2) * LANE_GAP;
+      v = prefer + (n % 2 === 0 ? step : -step);
+    }
+    taken.push(v);
     gutterAssigned.set(assignedKey, v);
     return v;
   };
@@ -775,6 +836,8 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
     const slot = slots.get(`${edge.source}\0${edge.target}`) || {
       out: 'out0',
       in: 'in0',
+      outIndex: 0,
+      inIndex: 0,
     };
     if (!sp || !tp) {
       return {
@@ -783,6 +846,8 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
         kind: edge.kind,
         sourcePort: slot.out,
         targetPort: slot.in,
+        slotOut: slot.out,
+        slotIn: slot.in,
         router: { name: 'orth', args: { padding: 24 } },
         connector: ROUNDED_CONNECTOR,
         vertices: [],
@@ -794,18 +859,17 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
     const obstacles = buildObstacleRects(positions, [], nodeSizes);
     const attrs = edge.kind === 'back' ? backAttrs : forwardAttrs;
     const bounds = pairBounds(sp, tp, ss, ts);
-    const preferRight = bounds.maxX + MIN_SEG;
-    const preferLeft = bounds.minX - MIN_SEG;
     const token = edgeToken(edge.source, edge.target);
+    const preferRightBase = bounds.maxX + MIN_SEG;
+    const preferLeftBase = bounds.minX - MIN_SEG;
     const { laneY: underY } = takeLocalUnder(sp, tp, ss, ts, token);
     const { laneY: overY } = takeLocalOver(sp, tp, ss, ts, token);
 
     const planForSides = (outSide, inSide) => {
       const outMeta = peekStub(stubOutCount, edge.source, outSide);
       const inMeta = peekStub(stubInCount, edge.target, inSide);
-      const outPort =
-        outSide === 'right' ? slot.out : OUT_PORT_BY_SIDE[outSide];
-      const inPort = inSide === 'left' ? slot.in : IN_PORT_BY_SIDE[inSide];
+      const outPort = outPortId(outSide, slot.outIndex ?? 0);
+      const inPort = inPortId(inSide, slot.inIndex ?? 0);
       const exit = sideStub(
         sp,
         outSide,
@@ -829,9 +893,9 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
       if (same) {
         const lane =
           outSide === 'right'
-            ? preferRight
+            ? takeSideWrap('right', preferRightBase, token)
             : outSide === 'left'
-              ? preferLeft
+              ? takeSideWrap('left', preferLeftBase, token)
               : outSide === 'bottom'
                 ? underY
                 : overY;
@@ -851,6 +915,7 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
         outMeta,
         inMeta,
         path,
+        keepPath: false,
       };
     };
 
@@ -866,6 +931,7 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
       sidePlans.find((p) => p.outSide === 'right' && p.inSide === 'left') ||
       sidePlans.find((p) => p.outSide === 'left' && p.inSide === 'right') ||
       sidePlans[0];
+    const wrapRight = takeSideWrap('right', preferRightBase, `w:${token}`);
     const wrapPlans = [
       {
         ...ltrPlan,
@@ -875,9 +941,10 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
           ltrPlan.enter.x,
           ltrPlan.enter.y,
           underY,
-          preferRight
+          wrapRight
         ),
         bias: 120,
+        keepPath: true,
       },
       {
         ...ltrPlan,
@@ -887,9 +954,10 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
           ltrPlan.enter.x,
           ltrPlan.enter.y,
           overY,
-          preferRight
+          wrapRight
         ),
         bias: 124,
+        keepPath: true,
       },
       {
         ...ltrPlan,
@@ -898,9 +966,10 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
           ltrPlan.exit.y,
           ltrPlan.enter.x,
           ltrPlan.enter.y,
-          preferRight
+          wrapRight
         ),
         bias: 128,
+        keepPath: true,
       },
     ];
 
@@ -912,6 +981,8 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
         kind: edge.kind,
         sourcePort: slot.out,
         targetPort: slot.in,
+        slotOut: slot.out,
+        slotIn: slot.in,
         router: { name: 'orth', args: { padding: 24 } },
         connector: ROUNDED_CONNECTOR,
         vertices: [],
@@ -920,17 +991,15 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
     }
 
     let finalPath = chosen.path;
-    if (chosen.outSide !== chosen.inSide) {
+    // Only re-lane facing Z routes. U/C wraps already have dedicated under/over/side pools;
+    // rewriting them to Z collapses distinct floors onto the same gutters.
+    if (chosen.outSide !== chosen.inSide && !chosen.keepPath) {
       const outVert =
         chosen.outSide === 'top' || chosen.outSide === 'bottom';
       const midBase = outVert
         ? (chosen.exit.y + chosen.enter.y) / 2
         : (chosen.exit.x + chosen.enter.x) / 2;
-      // Corridor key only (no edge pair) so parallel edges share one pool and get unique lanes.
-      const corridor = outVert
-        ? `vy:${Math.round(midBase / LANE_GAP)}`
-        : `g:${Math.round(midBase / LANE_GAP)}`;
-      const midPrefer = gutterLane(corridor, midBase, token);
+      const midPrefer = takeGutterMid(midBase, outVert ? 'y' : 'x', token);
       const routed = routeBetweenStubs(
         chosen.exit,
         chosen.enter,
@@ -950,6 +1019,8 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
       kind: edge.kind,
       sourcePort: chosen.exit.port,
       targetPort: chosen.enter.port,
+      slotOut: slot.out,
+      slotIn: slot.in,
       outSide: chosen.outSide,
       inSide: chosen.inSide,
       router: { name: 'normal' },
@@ -964,7 +1035,7 @@ function planEdges(rawEdges, positions, { isDark = false, nodeSizes = null, getN
  * Layout nodes LTR by BFS rank and build non-overlapping edge plans.
  * @returns {{ positions: Map<string,{x:number,y:number}>, ranks: Map<string,number>, edges: object[] }}
  */
-export function layoutSceneGraph(sceneGraph, rootId, nodeIds, { isDark = false } = {}) {
+export function layoutSceneGraph(sceneGraph, rootId, nodeIds, { isDark = false, nodeSizes = null } = {}) {
   const ids = nodeIds?.length ? nodeIds : Object.keys(sceneGraph || {});
   if (!ids.length) {
     return { positions: new Map(), ranks: new Map(), edges: [] };
@@ -980,9 +1051,9 @@ export function layoutSceneGraph(sceneGraph, rootId, nodeIds, { isDark = false }
   }
   orderByBarycenter(byLevel, outgoing, incoming);
 
-  const { positions } = placeNodes(byLevel, orphans, ids, ranks);
+  const { positions } = placeNodes(byLevel, orphans, ids, ranks, nodeSizes);
   const rawEdges = collectEdges(outgoing, ranks);
-  const edges = planEdges(rawEdges, positions, { isDark });
+  const edges = planEdges(rawEdges, positions, { isDark, nodeSizes });
 
   return { positions, ranks, edges };
 }
@@ -1000,6 +1071,12 @@ export function planToEdgeConfig(plan) {
     data: {
       viaStageId: plan.viaStageId || null,
       viaName: plan.viaName || null,
+      bridgeTargetId: plan.bridgeTargetId || null,
+      bridgeSourceId: plan.bridgeSourceId || null,
+      bridgeFolder: plan.bridgeFolder || null,
+      kind: plan.kind || null,
+      slotOut: plan.slotOut || plan.sourcePort || null,
+      slotIn: plan.slotIn || plan.targetPort || null,
     },
   };
   if (plan.labels?.length) cfg.labels = plan.labels;
@@ -1044,6 +1121,12 @@ export function applyEdgePlan(edge, plan) {
     ...(edge.getData?.() || {}),
     viaStageId: plan.viaStageId || null,
     viaName: plan.viaName || null,
+    bridgeTargetId: plan.bridgeTargetId || null,
+    bridgeSourceId: plan.bridgeSourceId || null,
+    bridgeFolder: plan.bridgeFolder || null,
+    kind: plan.kind || null,
+    slotOut: plan.slotOut || nextSrcPort || null,
+    slotIn: plan.slotIn || nextTgtPort || null,
   });
   // Pristine stroke for layer dim restore (X6 merges attrs; never capture dimmed live attrs).
   const line = plan.attrs?.line ? { ...plan.attrs.line } : { ...(edge.attr('line') || {}) };
@@ -1078,17 +1161,24 @@ export function routeEdgesForPositions(
   };
 }
 
+/** Extra free in/out slot so a new link always has a visible attach point. */
+export const SPARE_PORT_SLOTS = 1;
+
 export function buildNodeSizes(ids, inCount, outCount, isTransitionFn) {
   const map = new Map();
   for (const id of ids) {
-    const ic = inCount?.get(id) || 0;
-    const oc = outCount?.get(id) || 0;
+    const usedIn = inCount?.get(id) || 0;
+    const usedOut = outCount?.get(id) || 0;
+    const ic = usedIn + SPARE_PORT_SLOTS;
+    const oc = usedOut + SPARE_PORT_SLOTS;
     const isT = !!isTransitionFn?.(id);
     map.set(id, {
       width: nodeWidthForKind(isT),
       height: nodeHeightForDegree(ic, oc, isT),
       inCount: Math.max(1, ic),
       outCount: Math.max(1, oc),
+      usedIn,
+      usedOut,
       isTransition: isT,
     });
   }

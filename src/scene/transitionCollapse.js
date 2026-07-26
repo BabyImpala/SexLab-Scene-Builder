@@ -1,8 +1,30 @@
 import { cleanStageName, isTransitionStage } from './stageFamily';
+import { isPortalNodeId } from './folderView';
 
 export function shortTransitionLabel(name) {
   const cleaned = cleanStageName(name || '');
   return cleaned.replace(/^Go to\s+/i, '') || cleaned || 'transition';
+}
+
+function pushDest(next, s, t) {
+  if (!s || !t || !next[s]) return;
+  if (!next[s].dest.includes(t)) next[s].dest.push(t);
+}
+
+function applyExpandedEdge(next, s, t, via) {
+  if (!s || !t || !next[s]) return;
+  if (via && next[via]) {
+    pushDest(next, s, via);
+    pushDest(next, via, t);
+    const sp = next[s];
+    const tp = next[t];
+    if (sp && tp) {
+      next[via].x = (sp.x + tp.x) / 2;
+      next[via].y = (sp.y + tp.y) / 2;
+    }
+  } else {
+    pushDest(next, s, t);
+  }
 }
 
 /**
@@ -115,13 +137,22 @@ export function buildCollapseProjection(
 
 /**
  * Rebuild full SLSB graph from canvas pose nodes/edges + prior full graph.
- * Via-labeled edges expand to A→T→C; hidden transition stages are kept.
+ * Via-labeled edges expand to A→T→C; bridge edges restore cross-folder hops.
+ * When `viewStageIds` is set (virtual folder canvas), off-view topology is
+ * preserved from `prevGraph`.
  *
  * @param {{
  *   stages: object[],
  *   prevGraph: object,
  *   nodes: Array<{ id: string, x: number, y: number }>,
- *   edges: Array<{ source: string, target: string, viaStageId?: string|null }>,
+ *   edges: Array<{
+ *     source: string,
+ *     target: string,
+ *     viaStageId?: string|null,
+ *     bridgeTargetId?: string|null,
+ *     bridgeSourceId?: string|null,
+ *   }>,
+ *   viewStageIds?: string[]|null,
  * }} args
  */
 export function expandCanvasToStoredGraph({
@@ -129,6 +160,7 @@ export function expandCanvasToStoredGraph({
   prevGraph = {},
   nodes = [],
   edges = [],
+  viewStageIds = null,
 }) {
   const next = {};
   for (const stage of stages || []) {
@@ -142,6 +174,7 @@ export function expandCanvasToStoredGraph({
 
   const nodePos = new Map(nodes.map((n) => [n.id, n]));
   for (const [id, pos] of nodePos) {
+    if (isPortalNodeId(id)) continue;
     if (!next[id]) {
       next[id] = { dest: [], x: pos.x, y: pos.y };
     } else {
@@ -151,21 +184,28 @@ export function expandCanvasToStoredGraph({
   }
 
   for (const edge of edges) {
+    const via = edge.viaStageId || null;
+    if (edge.bridgeTargetId && !isPortalNodeId(edge.source)) {
+      applyExpandedEdge(next, edge.source, edge.bridgeTargetId, via);
+      continue;
+    }
+    if (edge.bridgeSourceId && !isPortalNodeId(edge.target)) {
+      applyExpandedEdge(next, edge.bridgeSourceId, edge.target, via);
+      continue;
+    }
     const s = edge.source;
     const t = edge.target;
-    const via = edge.viaStageId;
-    if (!s || !t || !next[s]) continue;
-    if (via && next[via]) {
-      if (!next[s].dest.includes(via)) next[s].dest.push(via);
-      if (!next[via].dest.includes(t)) next[via].dest.push(t);
-      const sp = next[s];
-      const tp = next[t];
-      if (sp && tp) {
-        next[via].x = (sp.x + tp.x) / 2;
-        next[via].y = (sp.y + tp.y) / 2;
+    if (!s || !t || isPortalNodeId(s) || isPortalNodeId(t)) continue;
+    applyExpandedEdge(next, s, t, via);
+  }
+
+  const viewSet = viewStageIds?.length ? new Set(viewStageIds) : null;
+  if (viewSet) {
+    for (const [s, node] of Object.entries(prevGraph || {})) {
+      if (!next[s] || viewSet.has(s)) continue;
+      for (const t of node.dest || []) {
+        pushDest(next, s, t);
       }
-    } else if (next[t] || true) {
-      if (!next[s].dest.includes(t)) next[s].dest.push(t);
     }
   }
 

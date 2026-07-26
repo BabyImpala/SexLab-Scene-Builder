@@ -85,11 +85,11 @@ export function buildStageLookups(stages = []) {
 
 /**
  * Resolve nav meta for edge source→target (stage ids).
- * Matches nav_text dest (ostim id) to target stage.
+ * Matches nav dest (ostim id) from ostim_nav tags or legacy nav_text.
  */
 export function navMetaForEdge(sourceStage, targetStage, ostimToStage) {
   if (!sourceStage) return null;
-  const entries = parseNavText(sourceStage.extra?.nav_text);
+  const entries = navEntriesForStage(sourceStage);
   if (!entries.length) return null;
   const targetOid = stageOstimId(targetStage);
   const targetId = targetStage?.id;
@@ -100,6 +100,19 @@ export function navMetaForEdge(sourceStage, targetStage, ostimToStage) {
     if (entry.dest === targetId) return entry;
   }
   return null;
+}
+
+/** @param {{ tags?: string[], extra?: { nav_text?: string } }} stage */
+export function navEntriesForStage(stage) {
+  const fromTags = [];
+  for (const tag of stage?.tags || []) {
+    const s = String(tag);
+    if (s.startsWith('ostim_nav:')) {
+      fromTags.push(...parseNavText(s.slice('ostim_nav:'.length)));
+    }
+  }
+  if (fromTags.length) return fromTags;
+  return parseNavText(stage?.extra?.nav_text);
 }
 
 function looksLikeReturn(meta, sourceName, targetName) {

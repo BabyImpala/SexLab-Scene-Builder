@@ -132,6 +132,51 @@ function NodeCtrlBtn({ label, onClick, danger, children }) {
 }
 
 function StageNode({ node, graph }) {
+  const isPortal = !!node.prop('isPortal');
+  if (isPortal) {
+    const folder = node.prop('portalFolder') || '?';
+    const targetName = node.prop('portalStageName') || node.prop('displayName') || '';
+    const jump = () => graph.emit('node:portalJump', { node });
+    return (
+      <div
+        className="stage-content stage-portal"
+        onDoubleClick={jump}
+        style={{
+          backgroundColor: makeColor(15, 118, 110, 0.18),
+          borderColor: 'rgba(15, 118, 110, 0.65)',
+          borderStyle: 'dashed',
+          cursor: 'pointer',
+          minHeight: 64,
+        }}
+        title="Open other folder canvas"
+      >
+        <div className="node-header">
+          <StatusIconRow
+            items={[
+              {
+                title: 'Other folder',
+                icon: (
+                  <span style={{ fontSize: 10, fontWeight: 700, color: makeColor(15, 118, 110) }}>
+                    →
+                  </span>
+                ),
+              },
+            ]}
+          />
+          <div className="node-controll-button-holder">
+            <NodeCtrlBtn label="Open folder" onClick={jump}>
+              Open
+            </NodeCtrlBtn>
+          </div>
+        </div>
+        <div style={{ fontSize: 10, opacity: 0.7, padding: '0 8px' }}>{folder}</div>
+        <div className="stage-name">
+          <h4 title={targetName}>{targetName || folder}</h4>
+        </div>
+      </div>
+    );
+  }
+
   const stage = node.prop('stage') || {};
   const start = node.prop('isStart');
   const fixedLen = node.prop('fixedLen');
@@ -237,6 +282,20 @@ function StageNode({ node, graph }) {
           {poseFamilyLabel}
         </div>
       ) : null}
+      {!!node.prop('ostimFolder') && !isTransition ? (
+        <div
+          style={{
+            fontSize: 10,
+            opacity: 0.7,
+            padding: '0 8px',
+            marginTop: poseFamilyLabel ? 0 : -2,
+            color: makeColor(15, 118, 110),
+          }}
+          title="OStim pack folder (disk split under scenes/)"
+        >
+          folder: {node.prop('ostimFolder')}
+        </div>
+      ) : null}
       <div className="stage-name">
         <h4 title={label || 'Untitled'}>{label || 'Untitled'}</h4>
       </div>
@@ -258,54 +317,251 @@ export function nodeWidthForKind(isTransition = false) {
   return isTransition ? TRANSITION_WIDTH : NODE_WIDTH;
 }
 
-export function buildPortItems(inCount, outCount, width, height) {
+/** Port id for an outgoing edge on a given side + slot index. */
+export function outPortId(side, index = 0) {
+  const i = Math.max(0, Number(index) || 0);
+  switch (side) {
+    case 'left':
+      return `outLeft${i}`;
+    case 'top':
+      return `outTop${i}`;
+    case 'bottom':
+      return `outBottom${i}`;
+    case 'right':
+    default:
+      return `out${i}`;
+  }
+}
+
+/** Port id for an incoming edge on a given side + slot index. */
+export function inPortId(side, index = 0) {
+  const i = Math.max(0, Number(index) || 0);
+  switch (side) {
+    case 'right':
+      return `inRight${i}`;
+    case 'top':
+      return `inTop${i}`;
+    case 'bottom':
+      return `inBottom${i}`;
+    case 'left':
+    default:
+      return `in${i}`;
+  }
+}
+
+/**
+ * Parse a port id into { role, side, index }. Accepts legacy unindexed ids
+ * (outLeft, inTop, …) as index 0.
+ */
+export function parsePortRef(portId) {
+  const s = String(portId || '');
+  let m;
+  if ((m = s.match(/^out(\d+)$/))) {
+    return { role: 'out', side: 'right', index: Number(m[1]) };
+  }
+  if ((m = s.match(/^in(\d+)$/))) {
+    return { role: 'in', side: 'left', index: Number(m[1]) };
+  }
+  if ((m = s.match(/^outLeft(\d*)$/))) {
+    return { role: 'out', side: 'left', index: Number(m[1] || 0) };
+  }
+  if ((m = s.match(/^outTop(\d*)$/))) {
+    return { role: 'out', side: 'top', index: Number(m[1] || 0) };
+  }
+  if ((m = s.match(/^outBottom(\d*)$/))) {
+    return { role: 'out', side: 'bottom', index: Number(m[1] || 0) };
+  }
+  if ((m = s.match(/^inRight(\d*)$/))) {
+    return { role: 'in', side: 'right', index: Number(m[1] || 0) };
+  }
+  if ((m = s.match(/^inTop(\d*)$/))) {
+    return { role: 'in', side: 'top', index: Number(m[1] || 0) };
+  }
+  if ((m = s.match(/^inBottom(\d*)$/))) {
+    return { role: 'in', side: 'bottom', index: Number(m[1] || 0) };
+  }
+  return { role: 'out', side: 'right', index: 0 };
+}
+
+/**
+ * Local (node-relative) coords for a port. In and out on the same face never
+ * share a point: each face packs both roles into unique slots along that edge.
+ */
+export function portArgsOnNode(
+  side,
+  role,
+  index,
+  inCount,
+  outCount,
+  width,
+  height
+) {
   const ins = Math.max(1, Number(inCount) || 1);
   const outs = Math.max(1, Number(outCount) || 1);
+  const i = Math.max(0, Number(index) || 0);
+  const w = width || NODE_WIDTH;
+  const h = height || NODE_HEIGHT;
+
+  if (side === 'left' || side === 'right') {
+    // Left: ins then outs. Right: outs then ins. Guarantees unique Y.
+    const total = ins + outs;
+    const slot =
+      side === 'left'
+        ? role === 'in'
+          ? i
+          : ins + i
+        : role === 'out'
+          ? i
+          : outs + i;
+    const y = ((slot + 1) / (total + 1)) * h;
+    // Slightly outside the node so FO content doesn't eat port clicks.
+    return { x: side === 'left' ? -3 : w + 3, y };
+  }
+
+  // Top/bottom: outs then ins along X; slight Y inset so roles never coincide.
+  const total = outs + ins;
+  const slot = role === 'out' ? i : outs + i;
+  const x = ((slot + 1) / (total + 1)) * w;
+  if (side === 'top') {
+    return { x, y: role === 'out' ? 1 : 4 };
+  }
+  return { x, y: role === 'out' ? h - 1 : h - 4 };
+}
+
+const PORT_DOT = {
+  r: 6.5,
+  magnet: true,
+  strokeWidth: 1.75,
+};
+
+/** Visible ComfyUI-style connection dots (left = in, right = out). */
+const PORT_IN_VISIBLE = {
+  ...PORT_DOT,
+  stroke: '#1d4ed8',
+  fill: '#93c5fd',
+};
+
+const PORT_OUT_VISIBLE = {
+  ...PORT_DOT,
+  stroke: '#15803d',
+  fill: '#86efac',
+};
+
+/** Free slot for a new link — muted but visible so empty stages still show connectors. */
+const PORT_SPARE_IN = {
+  ...PORT_DOT,
+  strokeWidth: 1.5,
+  stroke: '#93c5fd',
+  fill: '#dbeafe',
+  opacity: 0.85,
+};
+
+const PORT_SPARE_OUT = {
+  ...PORT_DOT,
+  strokeWidth: 1.5,
+  stroke: '#86efac',
+  fill: '#dcfce7',
+  opacity: 0.85,
+};
+
+/** Layout-only magnets — hit target without cluttering the node. */
+const PORT_HIDDEN = {
+  r: 6,
+  magnet: true,
+  stroke: 'transparent',
+  fill: 'transparent',
+  strokeWidth: 0,
+};
+
+/**
+ * @param {number} inCount total in slots (used + spare)
+ * @param {number} outCount total out slots (used + spare)
+ * @param {number} width
+ * @param {number} height
+ * @param {{ usedIn?: number, usedOut?: number }} [usage]
+ */
+export function buildPortItems(
+  inCount,
+  outCount,
+  width,
+  height,
+  { usedIn = null, usedOut = null } = {}
+) {
+  const ins = Math.max(1, Number(inCount) || 1);
+  const outs = Math.max(1, Number(outCount) || 1);
+  const usedI = usedIn == null ? ins : Math.max(0, Number(usedIn) || 0);
+  const usedO = usedOut == null ? outs : Math.max(0, Number(usedOut) || 0);
   const items = [];
   for (let i = 0; i < outs; i++) {
-    const y = ((i + 1) / (outs + 1)) * height;
+    const spare = i >= usedO;
     items.push({
-      id: `out${i}`,
+      id: outPortId('right', i),
       group: 'out',
-      args: { x: width - 1, y },
+      args: portArgsOnNode('right', 'out', i, ins, outs, width, height),
+      attrs: { circle: spare ? PORT_SPARE_OUT : PORT_OUT_VISIBLE },
+    });
+    items.push({
+      id: outPortId('left', i),
+      group: 'outSide',
+      args: portArgsOnNode('left', 'out', i, ins, outs, width, height),
+    });
+    items.push({
+      id: outPortId('top', i),
+      group: 'outSide',
+      args: portArgsOnNode('top', 'out', i, ins, outs, width, height),
+    });
+    items.push({
+      id: outPortId('bottom', i),
+      group: 'outSide',
+      args: portArgsOnNode('bottom', 'out', i, ins, outs, width, height),
     });
   }
   for (let i = 0; i < ins; i++) {
-    const y = ((i + 1) / (ins + 1)) * height;
+    const spare = i >= usedI;
     items.push({
-      id: `in${i}`,
+      id: inPortId('left', i),
       group: 'in',
-      args: { x: 0, y },
+      args: portArgsOnNode('left', 'in', i, ins, outs, width, height),
+      attrs: { circle: spare ? PORT_SPARE_IN : PORT_IN_VISIBLE },
+    });
+    items.push({
+      id: inPortId('right', i),
+      group: 'inSide',
+      args: portArgsOnNode('right', 'in', i, ins, outs, width, height),
+    });
+    items.push({
+      id: inPortId('top', i),
+      group: 'inSide',
+      args: portArgsOnNode('top', 'in', i, ins, outs, width, height),
+    });
+    items.push({
+      id: inPortId('bottom', i),
+      group: 'inSide',
+      args: portArgsOnNode('bottom', 'in', i, ins, outs, width, height),
     });
   }
-  items.push({ id: 'outLeft', group: 'outSide', args: { x: 1, y: height / 2 } });
-  items.push({ id: 'outTop', group: 'outSide', args: { x: width / 2, y: 1 } });
-  items.push({
-    id: 'outBottom',
-    group: 'outSide',
-    args: { x: width / 2, y: height - 1 },
-  });
-  items.push({
-    id: 'inRight',
-    group: 'in',
-    args: { x: width - 1, y: height / 2 },
-  });
-  items.push({ id: 'inTop', group: 'in', args: { x: width / 2, y: 1 } });
-  items.push({
-    id: 'inBottom',
-    group: 'in',
-    args: { x: width / 2, y: height - 1 },
-  });
   return items;
 }
 
-export function applyNodeSlots(node, { inCount = 1, outCount = 1, isTransition = false } = {}) {
+export function applyNodeSlots(
+  node,
+  {
+    inCount = 1,
+    outCount = 1,
+    usedIn = null,
+    usedOut = null,
+    isTransition = false,
+  } = {}
+) {
   if (!node) return;
   const w = nodeWidthForKind(isTransition);
   const h = nodeHeightForDegree(inCount, outCount, isTransition);
   node.prop('isTransition', isTransition);
   node.resize(w, h);
-  node.prop('ports/items', buildPortItems(inCount, outCount, w, h));
+  node.prop(
+    'ports/items',
+    buildPortItems(inCount, outCount, w, h, { usedIn, usedOut })
+  );
 }
 
 register({
@@ -317,36 +573,28 @@ register({
       out: {
         markup: [{ tagName: 'circle', selector: 'circle' }],
         attrs: {
-          circle: {
-            r: 6,
-            magnet: true,
-            stroke: 'transparent',
-            fill: 'transparent',
-          },
+          circle: PORT_OUT_VISIBLE,
         },
         position: { name: 'absolute' },
       },
       outSide: {
         markup: [{ tagName: 'circle', selector: 'circle' }],
         attrs: {
-          circle: {
-            r: 6,
-            magnet: true,
-            stroke: 'transparent',
-            fill: 'transparent',
-          },
+          circle: PORT_HIDDEN,
         },
         position: { name: 'absolute' },
       },
       in: {
         markup: [{ tagName: 'circle', selector: 'circle' }],
         attrs: {
-          circle: {
-            r: 6,
-            magnet: true,
-            stroke: 'transparent',
-            fill: 'transparent',
-          },
+          circle: PORT_IN_VISIBLE,
+        },
+        position: { name: 'absolute' },
+      },
+      inSide: {
+        markup: [{ tagName: 'circle', selector: 'circle' }],
+        attrs: {
+          circle: PORT_HIDDEN,
         },
         position: { name: 'absolute' },
       },
@@ -362,7 +610,11 @@ register({
     'isStart',
     'hubReturns',
     'poseFamily',
+    'ostimFolder',
     'isTransition',
+    'isPortal',
+    'portalFolder',
+    'portalStageName',
     'displayName',
   ],
   component: StageNode,
@@ -370,15 +622,17 @@ register({
 
 export { NODE_WIDTH, NODE_HEIGHT, SLOT_STEP, TRANSITION_WIDTH, TRANSITION_HEIGHT };
 
+/** @deprecated Use outPortId(side, index). Kept for index-0 fallbacks. */
 export const OUT_PORT_BY_SIDE = {
   right: 'out0',
-  left: 'outLeft',
-  top: 'outTop',
-  bottom: 'outBottom',
+  left: 'outLeft0',
+  top: 'outTop0',
+  bottom: 'outBottom0',
 };
+/** @deprecated Use inPortId(side, index). Kept for index-0 fallbacks. */
 export const IN_PORT_BY_SIDE = {
   left: 'in0',
-  right: 'inRight',
-  top: 'inTop',
-  bottom: 'inBottom',
+  right: 'inRight0',
+  top: 'inTop0',
+  bottom: 'inBottom0',
 };

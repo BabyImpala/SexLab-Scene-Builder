@@ -161,3 +161,25 @@
 .graph-data-field {
   padding: 5px;
 }
+
+/* ComfyUI-style port dots (X6 magnet circles on stage nodes). */
+.x6-widget-stage_node .x6-port-body,
+.x6-node .x6-port-body {
+  cursor: crosshair;
+  transition: r 0.12s ease, stroke-width 0.12s ease;
+}
+
+.x6-node .x6-port-body:hover {
+  r: 7;
+  stroke-width: 2.25;
+}
+
+#root.dark-mode .x6-port[port-group="in"] .x6-port-body {
+  fill: #1e3a8a;
+  stroke: #93c5fd;
+}
+
+#root.dark-mode .x6-port[port-group="out"] .x6-port-body {
+  fill: #14532d;
+  stroke: #86efac;
+}

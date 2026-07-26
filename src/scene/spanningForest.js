@@ -18,6 +18,8 @@ import { NODE_WIDTH, NODE_HEIGHT } from './SceneNode';
 const ORIGIN = 40;
 const H_GAP = 420;
 const V_GAP = 200;
+/** Extra space between stacked node bottoms and the next node top. */
+const ROW_CLEARANCE = 56;
 /** Max siblings stacked in one depth-column before spilling sideways. */
 const MAX_BAND_ROWS = 6;
 
@@ -255,6 +257,7 @@ export function layoutFromForest(
     children = null,
     roots = [],
     getName = null,
+    nodeSizes = null,
   } = {}
 ) {
   const ids = nodeIds?.length ? nodeIds : [...ranks.keys()];
@@ -263,6 +266,9 @@ export function layoutFromForest(
   const hGap = large ? 420 : H_GAP;
   const vGap = large ? 168 : V_GAP;
   const bandGap = large ? 96 : 80;
+  const clearance = large ? 48 : ROW_CLEARANCE;
+  const heightOf = (id) =>
+    Math.max(NODE_HEIGHT, Number(nodeSizes?.get(id)?.height) || NODE_HEIGHT);
   const positions = new Map();
 
   const famMap = families || new Map(ids.map((id) => [id, 'Other']));
@@ -331,19 +337,22 @@ export function layoutFromForest(
     const maxRows = large ? MAX_BAND_ROWS : Math.max(MAX_BAND_ROWS, 10);
     const local = new Map();
     let maxXCol = 0;
-    let maxYRow = 0;
+    let bandHeight = 0;
     let xCursor = 0;
     for (const depth of [...byCol.keys()].sort((a, b) => a - b)) {
       const colIds = byCol.get(depth);
       const subCols = Math.max(1, Math.ceil(colIds.length / maxRows));
+      /** Running Y top per sub-column (height-aware, not fixed vGap). */
+      const subY = Array.from({ length: subCols }, () => 0);
       colIds.forEach((id, i) => {
         const sub = Math.floor(i / maxRows);
-        const row = i % maxRows;
         const xCol = xCursor + sub;
-        local.set(id, { x: xCol * hGap, y: row * vGap });
+        const h = heightOf(id);
+        local.set(id, { x: xCol * hGap, y: subY[sub] });
+        subY[sub] += h + clearance;
         maxXCol = Math.max(maxXCol, xCol);
-        maxYRow = Math.max(maxYRow, row);
       });
+      bandHeight = Math.max(bandHeight, ...subY, vGap);
       xCursor += subCols;
     }
 
@@ -352,7 +361,7 @@ export function layoutFromForest(
       members,
       local,
       width: (maxXCol + 1) * hGap,
-      height: (maxYRow + 1) * vGap,
+      height: Math.max(bandHeight, vGap),
     };
   });
 
@@ -404,15 +413,24 @@ export function layoutFromForest(
   if (missing.length) {
     const maxY = Math.max(
       ORIGIN,
-      ...[...positions.values()].map((p) => p.y + NODE_HEIGHT)
+      ...[...positions.entries()].map(([id, p]) => p.y + heightOf(id))
     );
-    missing.forEach((id, i) => {
+    let y = maxY + bandGap;
+    let x = ORIGIN;
+    let col = 0;
+    missing.forEach((id) => {
       if (positions.has(id)) return;
-      positions.set(id, {
-        x: ORIGIN + (i % 5) * hGap,
-        y: maxY + bandGap + Math.floor(i / 5) * vGap,
-      });
+      const h = heightOf(id);
+      positions.set(id, { x, y });
       if (!ranks.has(id)) ranks.set(id, -1);
+      col += 1;
+      if (col >= 5) {
+        col = 0;
+        x = ORIGIN;
+        y += h + clearance;
+      } else {
+        x += hGap;
+      }
     });
   }
 

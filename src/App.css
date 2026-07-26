@@ -154,26 +154,60 @@ h3, h4, h5 { font-size: 1.2em; }
   border-radius: var(--app-radius);
   border-style: solid;
   border-color: var(--app-border-color);
-  padding: 0.25em;
-  padding-left: 1em;
-  padding-right: 1em;
+  padding: 0.25em 0.5em;
   background-color: var(--app-input-bg);
   overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .graph-toolbox-content {
-  float: right;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px 4px;
+  width: 100%;
+}
+
+.graph-toolbox-content .ant-space {
+  flex-wrap: wrap;
+  row-gap: 4px;
 }
 
 .graph-toolbox-content .ant-space-item {
   display: flex;
 }
 
+.graph-view-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 220px;
+  padding: 10px 12px;
+  background: var(--app-input-bg, #fff);
+  border: 1px solid var(--app-border-color, #d9d9d9);
+  border-radius: var(--app-radius, 6px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+}
+
+.graph-view-filters .ant-select {
+  width: 100%;
+}
+
 #sceneTags-panel,
 #scenePositions {
   height: 100%;
+  min-height: 0;
   background: var(--app-panel-bg);
-  overflow: auto;
+  box-sizing: border-box;
+}
+
+/* Tags + furniture stack: tags scroll, furniture stays reachable. */
+#sceneTags-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 0.25em;
 }
 
 .sceneTags-attribute-card,
@@ -185,18 +219,94 @@ h3, h4, h5 { font-size: 1.2em; }
   background: var(--app-panel-bg);
 }
 
-.furniture-attribute-card {
-  height: calc(100% - 56px);
+#sceneTags-panel .sceneTags-attribute-card.ant-card {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  margin-bottom: 0.35em;
 }
 
-#sceneTags-panel .ant-card-body {
-  height: calc(100% - 164px);
+#sceneTags-panel .sceneTags-attribute-card .ant-card-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto !important;
+  max-height: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+#sceneTags-panel .furniture-attribute-card.ant-card {
+  flex: 0 0 auto;
+  height: auto !important;
+  margin-top: 0.35em;
+}
+
+#sceneTags-panel .furniture-attribute-card .ant-card-body {
+  height: auto !important;
+  overflow: visible;
+}
+
+#scenePositions {
   overflow: auto;
 }
 
 .graph-container {
   flex: 1;
   overflow: hidden;
+  position: relative;
+}
+
+.graph-connect-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  z-index: 30;
+  max-width: min(420px, 90%);
+  padding: 6px 12px;
+  border-radius: var(--app-radius, 6px);
+  border: 1px solid var(--app-border-color, #d9d9d9);
+  background: var(--app-input-bg, #fff);
+  color: var(--app-input-fg, #141414);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
+  text-align: center;
+}
+
+.graph-edge-ctx-menu,
+.graph-ctx-menu {
+  position: fixed;
+  z-index: 1100;
+  min-width: 188px;
+  border-radius: var(--app-radius, 6px);
+  border: 1px solid var(--app-border-color, #d9d9d9);
+  background: var(--app-input-bg, #fff);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+
+.graph-edge-ctx-menu .ant-menu,
+.graph-ctx-menu .ant-menu {
+  border-inline-end: none !important;
+}
+
+body.slsb-connecting,
+body.slsb-connecting * {
+  cursor: crosshair !important;
+}
+
+/* Preview / other edges must not steal the click meant for the target port. */
+body.slsb-connecting .x6-edge {
+  pointer-events: none !important;
+}
+
+/* Larger port hit target while connecting. */
+body.slsb-connecting .x6-node .x6-port-body {
+  r: 9;
 }
 
 .graph-canvas-host,

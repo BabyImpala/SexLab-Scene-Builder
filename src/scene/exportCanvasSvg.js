@@ -1,4 +1,9 @@
-import { NODE_WIDTH, NODE_HEIGHT } from './SceneNode';
+import {
+  NODE_WIDTH,
+  NODE_HEIGHT,
+  parsePortRef,
+  portArgsOnNode,
+} from './SceneNode';
 
 function escapeXml(s) {
   return String(s ?? '')
@@ -32,26 +37,14 @@ function isBackStroke(stroke) {
 }
 
 /** Port attachment from node origin + port id (SVG fallback). */
-function portPoint(pos, portId) {
-  const cx = pos.x + NODE_WIDTH / 2;
-  const cy = pos.y + NODE_HEIGHT / 2;
-  switch (portId) {
-    case 'outLeft':
-      return { x: pos.x, y: cy };
-    case 'outTop':
-    case 'inTop':
-      return { x: cx, y: pos.y };
-    case 'outBottom':
-    case 'inBottom':
-      return { x: cx, y: pos.y + NODE_HEIGHT };
-    case 'inRight':
-      return { x: pos.x + NODE_WIDTH, y: cy };
-    case 'in':
-      return { x: pos.x, y: cy };
-    case 'out':
-    default:
-      return { x: pos.x + NODE_WIDTH, y: cy };
-  }
+function portPoint(pos, portId, size = null) {
+  const w = size?.width || NODE_WIDTH;
+  const h = size?.height || NODE_HEIGHT;
+  const ins = size?.inCount || 1;
+  const outs = size?.outCount || 1;
+  const ref = parsePortRef(portId);
+  const args = portArgsOnNode(ref.side, ref.role, ref.index, ins, outs, w, h);
+  return { x: pos.x + args.x, y: pos.y + args.y };
 }
 
 function collectGraphSnapshot(graph, { isDark = false, onlyVisible = false } = {}) {

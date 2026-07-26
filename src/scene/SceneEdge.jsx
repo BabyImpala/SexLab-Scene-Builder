@@ -43,6 +43,65 @@ export function viaEdgeAttrs(isDark = false) {
   };
 }
 
+/** Cross–virtual-canvas link (other ostim_folder). Distinct from via (purple). */
+export function bridgeEdgeAttrs(isDark = false) {
+  return {
+    line: {
+      stroke: isDark ? '#2dd4bf' : '#0f766e',
+      strokeWidth: 1.75,
+      strokeDasharray: '2 5',
+      targetMarker: { ...EDGE_MARKER },
+    },
+  };
+}
+
+/** Thicker via-edge stroke for hover highlight. */
+export function viaEdgeHoverLinePatch(isDark = false) {
+  return {
+    stroke: isDark ? '#c4b5fd' : '#5b21b6',
+    strokeWidth: 3.25,
+  };
+}
+
+/** Thicker bridge-edge stroke for hover highlight. */
+export function bridgeEdgeHoverLinePatch(isDark = false) {
+  return {
+    stroke: isDark ? '#5eead4' : '#115e59',
+    strokeWidth: 3.25,
+  };
+}
+
+/** Forward / primary edges (white or near-black). */
+export function forwardEdgeHoverLinePatch(isDark = false) {
+  return {
+    stroke: isDark ? '#ffffff' : '#000000',
+    strokeWidth: 3.25,
+  };
+}
+
+/** Back / return edges (orange). */
+export function backEdgeHoverLinePatch(isDark = false) {
+  return {
+    stroke: isDark ? '#fdba74' : '#9a3412',
+    strokeWidth: 3.5,
+  };
+}
+
+/** Pick hover stroke for an edge from its data.kind (and via/bridge flags). */
+export function edgeHoverLinePatch(edgeData, isDark = false) {
+  const data = edgeData || {};
+  if (data.bridgeTargetId || data.bridgeSourceId || data.kind === 'bridge') {
+    return bridgeEdgeHoverLinePatch(isDark);
+  }
+  if (data.viaStageId || data.kind === 'via') {
+    return viaEdgeHoverLinePatch(isDark);
+  }
+  if (data.kind === 'back') {
+    return backEdgeHoverLinePatch(isDark);
+  }
+  return forwardEdgeHoverLinePatch(isDark);
+}
+
 export function edgeLabelConfig(text, isDark = false) {
   if (!text) return [];
   return [

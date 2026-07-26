@@ -250,32 +250,28 @@ export function visibleEdgeKeys(
     const dests = (sceneGraph[source]?.dest || []).filter((d) => idSet.has(d));
     for (const target of dests) {
       const key = `${source}\0${target}`;
+      // Always show every edge touching the focused node(s).
+      if (focus.size && (focus.has(source) || focus.has(target))) {
+        keys.add(key);
+        continue;
+      }
       if (mode === 'all') {
         keys.add(key);
         continue;
       }
       if (mode === 'neighborhood') {
-        if (focus.size === 0) continue;
-        if (focus.has(source) || focus.has(target)) keys.add(key);
+        // No focus → nothing (focus case handled above).
         continue;
       }
       if (mode === 'primary') {
         const inTree = treeKeys ? treeKeys.has(key) : false;
         const rankedPrimary = edgeInfo?.get(key)?.rank === 'primary';
-        if (inTree || rankedPrimary) {
-          keys.add(key);
-        } else if (focus.size && (focus.has(source) || focus.has(target))) {
-          keys.add(key);
-        }
+        if (inTree || rankedPrimary) keys.add(key);
         continue;
       }
       const sf = families.get(source);
       const tf = families.get(target);
-      if (sf && tf && sf === tf) {
-        keys.add(key);
-      } else if (focus.size && (focus.has(source) || focus.has(target))) {
-        keys.add(key);
-      }
+      if (sf && tf && sf === tf) keys.add(key);
     }
   }
 

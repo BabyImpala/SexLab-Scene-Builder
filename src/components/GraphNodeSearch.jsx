@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { AutoComplete, Input, Typography } from 'antd';
 import { SearchOutlined } from '@ant-design/icons';
 import { cleanStageName, poseFamily } from '../scene/stageFamily';
+import { stageOstimFolder } from '../scene/graphFocus';
 
 /**
  * Simple fuzzy score: subsequence + substring bonus.
@@ -45,6 +46,7 @@ export default function GraphNodeSearch({
       const name = stage.name || '';
       const clean = cleanStageName(name);
       const fam = poseFamily(name);
+      const folder = stageOstimFolder(stage);
       const oid =
         (stage.tags || []).find((t) => String(t).startsWith('ostim_id:'))?.slice(9) ||
         '';
@@ -53,6 +55,7 @@ export default function GraphNodeSearch({
         fuzzyScore(q, name),
         fuzzyScore(q, stage.id),
         fuzzyScore(q, fam),
+        fuzzyScore(q, folder),
         fuzzyScore(q, oid)
       );
       if (s <= 0) continue;
@@ -65,8 +68,7 @@ export default function GraphNodeSearch({
               {clean || name || stage.id}
             </Typography.Text>
             <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-              {fam}
-              {oid ? ` · ${oid}` : ''}
+              {[fam, folder && `folder:${folder}`, oid].filter(Boolean).join(' · ')}
             </Typography.Text>
           </div>
         ),
