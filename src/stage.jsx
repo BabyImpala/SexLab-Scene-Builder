@@ -7,21 +7,33 @@ import { useImmer } from "use-immer";
 import { FileDoneOutlined, TagsOutlined, SaveOutlined, TeamOutlined } from '@ant-design/icons';
 import { Input, Button, Tooltip, InputNumber, Card, Layout, Row, Col, Tabs, notification, Collapse, ConfigProvider, Select, Spin } from 'antd';
 
-import { tagsSFW, tagsNSFW } from "./common/Tags"
+import { tagsSFW, tagsNSFW, tagsOStimActions } from "./common/Tags"
 const PositionField = lazy(() => import("./stage/PositionField"));
 const TagTree = lazy(() => import("./components/TagTree"));
+import OstimFolderField from "./components/OstimFolderField";
+import OstimNavFields from "./components/OstimNavFields";
+import {
+  resolveNavEditorRows,
+  tagsWithOstimNavs,
+  readableNavTextFromRows,
+} from "./common/ostimNav";
 import "./stage.css";
 import "./App.css";
 // import "./Dark.css";
 import { getAppTheme } from "./common/theme";
 import { applyRootDarkClass, readOsDarkMode, writeStoredDarkMode } from "./common/darkMode";
+import {
+  normalizeAssetLibrary,
+  rememberAssetValues,
+  mergeGlobalAssetLibrary,
+} from "./common/assetLibrary";
 
 const { Header, Content } = Layout;
 const { TextArea } = Input;
 
 let root = null;
 document.addEventListener('DOMContentLoaded', async () => {
-  const load = ({ scene, stage, positions, dark }) => {
+  const load = ({ scene, stage, positions, dark, asset_library }) => {
     console.log("Scene ID:", scene, "Stage:", stage);
     const stagePositions = stage.positions || [];
     const scenePositions = positions || [];
@@ -67,6 +79,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const initialDark = typeof dark === 'boolean' ? dark : readOsDarkMode();
     writeStoredDarkMode(initialDark);
     applyRootDarkClass(initialDark);
+    const assetLibrary = normalizeAssetLibrary(asset_library);
+    mergeGlobalAssetLibrary(assetLibrary);
     if (!root) root = ReactDOM.createRoot(document.getElementById("root"));
     root.render(
       <React.StrictMode>
@@ -76,6 +90,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           _stage={{ ...stage, positions: merged.map((m) => m.position) }}
           _positions={merged}
           _initialDark={initialDark}
+          _assetLibrary={assetLibrary}
         />
       </React.StrictMode>
     );
@@ -92,11 +107,14 @@ function makePositionTab(p, i) {
   return { key: `PTab${i}`, position: p.position, info: p.info }
 }
 
-function Editor({ _sceneId, _stage, _positions, _initialDark }) {
+function Editor({ _sceneId, _stage, _positions, _initialDark, _assetLibrary }) {
   const [isDark, setIsDark] = useState(() =>
     typeof _initialDark === 'boolean' ? _initialDark : readOsDarkMode()
   );
   const [api, contextHolder] = notification.useNotification();
+  const [assetLibrary, setAssetLibrary] = useState(() =>
+    normalizeAssetLibrary(_assetLibrary)
+  );
 
   const [name, setName] = useState(_stage.name);
   const [positions, updatePositions] = useImmer(_positions.map((p, i) => { return makePositionTab(p, i) }));
@@ -106,12 +124,34 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
   const [fixedLen, setFixedLen] = useState(_stage.extra?.fixed_len);
   const [navText, setNavText] = useState(_stage.extra?.nav_text || '');
   const [sound, setSound] = useState(_stage.extra?.sound || '');
+  const [navRows, setNavRows] = useState(() =>
+    resolveNavEditorRows(_stage.id, _stage.tags || [])
+  );
   const [raceKeys, setRaceKeys] = useState([]);
+  const hasOstimNav = navRows.length > 0;
+
+  const applyNavRows = (rows) => {
+    setNavRows(rows);
+    setTags((prev) => tagsWithOstimNavs(prev, rows));
+    // Keep Extras summary in sync with OStim descriptions (pose stages).
+    setNavText(readableNavTextFromRows(rows));
+  };
 
   useEffect(() => {
     invoke('get_race_keys')
       .then((result) => setRaceKeys(Array.isArray(result) ? result : []))
       .catch(() => setRaceKeys([]));
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen('on_asset_library_update', (event) => {
+      const next = normalizeAssetLibrary(event.payload);
+      setAssetLibrary(next);
+      mergeGlobalAssetLibrary(next);
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
   }, []);
 
   useEffect(() => {
@@ -157,15 +197,11 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
   function saveAndReturn() {
     let positionArg = [];
     let positionsInfo = [];
+    let missingHkx = [];
     for (let i = 0; i < positions.length; i++) {
       const { position: stage_p, info: scene_p } = positions[i];
-      if (!stage_p.event[0]) {
-        api.error({
-          message: 'Missing Event',
-          description: `Position ${i + 1} is missing its behavior file (.hkx)`,
-          placement: 'bottomLeft',
-        });
-        return;
+      if (!stage_p.event?.[0]) {
+        missingHkx.push(i + 1);
       }
       if (!scene_p.sex.male && !scene_p.sex.female && !scene_p.sex.futa) {
         api.error({
@@ -180,6 +216,7 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
         : String(stage_p.anim_obj ?? '');
       positionArg.push({
         ...stage_p,
+        event: Array.isArray(stage_p.event) ? stage_p.event : [],
         anim_obj: animRaw
           .split(/[,\s]+/)
           .map((s) => s.trim())
@@ -188,14 +225,31 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
       });
       positionsInfo.push(scene_p);
     }
+    if (missingHkx.length) {
+      api.warning({
+        message: 'Saved without .hkx',
+        description: `Position ${missingHkx.join(', ')} has no anim event — OK for graph/folder testing. Add a behavior file before SexLab/FNIS export.`,
+        placement: 'bottomLeft',
+        duration: 6,
+      });
+    }
+    for (const pos of positionArg) {
+      rememberAssetValues('events', pos.event || []);
+      rememberAssetValues('anim_objects', pos.anim_obj || '');
+      rememberAssetValues('equip_objects', pos.equip_objects || '');
+    }
+    const stageTags = hasOstimNav ? tagsWithOstimNavs(tags, navRows) : tags;
+    const stageNavText = hasOstimNav
+      ? readableNavTextFromRows(navRows)
+      : navText || '';
     const stage = {
       id: _stage.id,
       name,
       positions: positionArg,
-      tags,
+      tags: stageTags,
       extra: {
         fixed_len: fixedLen || 0.0,
-        nav_text: navText || '',
+        nav_text: stageNavText,
         sound: sound || '',
       },
     };
@@ -257,12 +311,18 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
       extra: <TagsOutlined />,
       children:
         <div className="tag-display-box">
+          <OstimFolderField
+            tags={tags}
+            onChange={setTags}
+            style={{ marginBottom: 12 }}
+          />
           <Suspense fallback={<Spin />}>
             <TagTree
               tags={tags}
               onChange={setTags}
               tagsSFW={tagsSFW}
               tagsNSFW={tagsNSFW}
+              tagsOStimActions={tagsOStimActions}
             />
           </Suspense>
         </div>
@@ -293,6 +353,7 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
                       position={p.position}
                       info={p.info}
                       raceKeys={raceKeys}
+                      assetLibrary={assetLibrary}
                       onChange={(newPosition, newInfo) => {
                         updatePositions((draft) => {
                           draft[i].position = newPosition;
@@ -319,15 +380,38 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
       extra: <FileDoneOutlined />,
       children:
         <>
+          {hasOstimNav ? (
+            <Card
+              style={{ marginBottom: 8 }}
+              title="OStim navigation"
+              extra={
+                <Tooltip
+                  title={
+                    'Per outbound link: description, priority, icon path, and border color. Stored as ostim_nav: tags (exported to OStim scene JSON).'
+                  }
+                >
+                  <Button type="text">Info</Button>
+                </Tooltip>
+              }
+            >
+              <OstimNavFields
+                rows={navRows}
+                onChange={applyNavRows}
+                assetLibrary={assetLibrary}
+              />
+            </Card>
+          ) : null}
           <Row gutter={[2, 2]}>
-            <Col span={8}>
+            <Col span={hasOstimNav ? 12 : 8}>
               <Card
                 style={{ height: '100%' }}
-                title={'Navigation'}
+                title={hasOstimNav ? 'Nav summary' : 'Navigation'}
                 extra={
                   <Tooltip
                     title={
-                      'Short player-facing description for this branch (e.g. "bow down"). Do not put icon names here.'
+                      hasOstimNav
+                        ? 'Read-only summary of OStim descriptions (synced from the fields above). Transition stages use this box as the via-edge label.'
+                        : 'Short player-facing description for this branch (e.g. "bow down"). For OStim pose icons, link stages on the graph first — then icon/priority fields appear here.'
                     }
                   >
                     <Button type="text">Info</Button>
@@ -340,14 +424,14 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
                   showCount
                   rows={3}
                   style={{ resize: 'none', width: '100%' }}
-                  placeholder='e.g. bow down'
-                  defaultValue={_stage.extra.navText}
+                  placeholder="e.g. bow down"
                   value={navText}
+                  readOnly={hasOstimNav}
                   onChange={(e) => setNavText(e.target.value)}
-                ></TextArea>
+                />
               </Card>
             </Col>
-            <Col span={8}>
+            <Col span={hasOstimNav ? 6 : 8}>
               <Card
                 style={{ height: '100%' }}
                 title={'Fixed Duration'}
@@ -376,7 +460,7 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
                 />
               </Card>
             </Col>
-            <Col span={8}>
+            <Col span={hasOstimNav ? 6 : 8}>
               <Card
                 style={{ height: '100%' }}
                 title={'Sound (SLAL only)'}
@@ -415,6 +499,8 @@ function Editor({ _sceneId, _stage, _positions, _initialDark }) {
     activePosition,
     raceKeys,
     navText,
+    navRows,
+    hasOstimNav,
     sound,
     fixedLen,
     _sceneId,
