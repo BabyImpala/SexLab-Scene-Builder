@@ -149,7 +149,8 @@ pub fn tag_to_action(tag: &str) -> Option<&'static str> {
 /// Build OStim `actions` from SLSB scene/stage tags (prefers `action:type:a:t:p`).
 pub fn tags_to_actions(tags: &[String], actor_count: usize) -> Vec<serde_json::Value> {
     let mut seen = std::collections::HashSet::new();
-    let mut actions = Vec::new();
+    let mut from_explicit = Vec::new();
+    let mut from_soft = Vec::new();
     for tag in tags {
         if let Some(rest) = tag.strip_prefix("action:") {
             let parts: Vec<&str> = rest.split(':').collect();
@@ -179,12 +180,24 @@ pub fn tags_to_actions(tags: &[String], actor_count: usize) -> Vec<serde_json::V
             if performer != actor {
                 obj["performer"] = serde_json::json!(performer);
             }
-            actions.push(obj);
+            from_explicit.push(obj);
             continue;
         }
         let Some(action_type) = tag_to_action(tag) else {
             continue;
         };
+        // Soft SexLab tags (e.g. Loving ← holdingbody) only apply when no
+        // explicit action: records exist — otherwise they invent duplicates.
+        from_soft.push((action_type, tag.clone()));
+    }
+
+    if !from_explicit.is_empty() {
+        return from_explicit;
+    }
+
+    seen.clear();
+    let mut actions = Vec::new();
+    for (action_type, _) in from_soft {
         if !seen.insert(action_type.to_string()) {
             continue;
         }
@@ -296,11 +309,17 @@ mod tests {
             &["action:vaginalsex:0:1:1".into(), "Blowjob".into()],
             2,
         );
-        assert_eq!(actions.len(), 2);
+        // Explicit action: wins; soft tags must not invent extras (Loving→hugging etc.).
+        assert_eq!(actions.len(), 1);
         assert_eq!(actions[0]["type"], "vaginalsex");
         assert_eq!(actions[0]["actor"], 0);
         assert_eq!(actions[0]["target"], 1);
         assert_eq!(actions[0]["performer"], 1);
+
+        let soft_only = tags_to_actions(&["Blowjob".into(), "Loving".into()], 2);
+        assert_eq!(soft_only.len(), 2);
+        assert_eq!(soft_only[0]["type"], "blowjob");
+        assert_eq!(soft_only[1]["type"], "hugging");
     }
 
     #[test]

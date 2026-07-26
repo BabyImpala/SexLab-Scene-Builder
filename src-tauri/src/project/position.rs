@@ -40,12 +40,21 @@ pub struct Position {
     /// OStim animationIndex; None = use actor slot index.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation_index: Option<u32>,
-    /// OStim expressionOverride (e.g. "tongue").
+    /// OStim expressionOverride (e.g. "tongue", "eyesclosed").
     #[serde(default)]
     pub expression_override: String,
+    /// OStim expressionAction (integer action id; Sanguine et al.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression_action: Option<i32>,
     /// OStim equip object type ids (space/comma-separated), author fill-in.
     #[serde(default)]
     pub equip_objects: String,
+    /// OStim actor feetOnGround (project JSON / OStim round-trip only).
+    #[serde(default)]
+    pub feet_on_ground: bool,
+    /// OStim actor scaleHeight (cm); None = omit on export.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_height: Option<f32>,
 
     #[serde(skip_serializing, default)]
     pub extra: Extra,
@@ -79,7 +88,10 @@ impl Position {
             animation_index: reference.and_then(|pos| pos.animation_index),
             expression_override: reference
                 .map_or_else(String::new, |pos| pos.expression_override.clone()),
+            expression_action: reference.and_then(|pos| pos.expression_action),
             equip_objects: reference.map_or_else(String::new, |pos| pos.equip_objects.clone()),
+            feet_on_ground: reference.map_or(false, |pos| pos.feet_on_ground),
+            scale_height: reference.and_then(|pos| pos.scale_height),
             extra: Default::default(),
             scale: 1.0,
         }

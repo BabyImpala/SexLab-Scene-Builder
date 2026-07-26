@@ -25,6 +25,8 @@ pub mod behavior_gen;
 
 pub mod ostim;
 
+pub mod progress;
+
 mod serialize;
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

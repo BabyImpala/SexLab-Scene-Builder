@@ -4,17 +4,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
 import { Graph, Shape } from '@antv/x6'
 import { History } from "@antv/x6-plugin-history";
-import { Menu, Layout, Card, Input, Space, Button, Empty, Modal, Tooltip, notification, Divider, Switch, Checkbox, Row, Col, InputNumber, Select, ConfigProvider, Dropdown, Segmented, Typography } from 'antd'
+import { Menu, Layout, Card, Input, Space, Button, Empty, Modal, Tooltip, notification, Divider, Switch, Checkbox, Row, Col, InputNumber, Select, ConfigProvider, Dropdown, Segmented, Typography, Alert } from 'antd'
 import {
   ExperimentOutlined, FolderOutlined, PlusOutlined, ExclamationCircleOutlined, QuestionCircleOutlined, DiffOutlined, ZoomInOutlined, ZoomOutOutlined,
   DeleteOutlined, DoubleLeftOutlined, DoubleRightOutlined, PicCenterOutlined, CompressOutlined, PushpinOutlined, DragOutlined, WarningOutlined,
-  ApartmentOutlined, DownloadOutlined, UndoOutlined, UnorderedListOutlined
+  ApartmentOutlined, DownloadOutlined, UndoOutlined, UnorderedListOutlined, FilterOutlined
 } from '@ant-design/icons';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import './ResizableSidebar.css';
 const { Header, Content, Footer, Sider } = Layout;
 const { confirm } = Modal;
-import { STAGE_EDGE, STAGE_EDGE_SHAPEID, forwardEdgeAttrs } from "./scene/SceneEdge"
+import { STAGE_EDGE, STAGE_EDGE_SHAPEID, forwardEdgeAttrs, viaEdgeAttrs, edgeHoverLinePatch, edgeLabelConfig } from "./scene/SceneEdge"
 import { Furnitures } from "./common/Furniture";
 import "./scene/SceneNode"
 import { applyNodeSlots } from "./scene/SceneNode"
@@ -23,15 +23,36 @@ import {
   graphCoordsStacked,
   planToEdgeConfig,
   applyEdgePlan,
+  SPARE_PORT_SLOTS,
 } from "./scene/graphLayout"
 import {
   computeGraphPresentation,
   applyEdgeVisibility,
   resolveVisibleKeys,
-  applyNodeFamilyDim,
-  applyGraphLayerDim,
+  applyNodeFocusDim,
   sceneGraphSignature,
 } from "./scene/graphPresentation"
+import {
+  buildFolderMap,
+  folderFilterOptions,
+  folderStageCounts,
+  neighborhoodIds,
+  stageOstimFolder,
+  tagsWithOstimFolder,
+  isOstimPlumbingTag,
+  LARGE_SCENE_STAGE_WARN,
+} from "./scene/graphFocus"
+import {
+  isPortalNodeId,
+  folderViewStageIds,
+  stageIdFromPortal,
+} from "./scene/folderView"
+import {
+  loadGlobalAssetLibrary,
+  mergeGlobalAssetLibrary,
+  normalizeAssetLibrary,
+  emptyAssetLibrary,
+} from "./common/assetLibrary"
 import {
   expandCanvasToStoredGraph,
   shortTransitionLabel,
@@ -44,6 +65,7 @@ import {
 import { connectionsToCsv } from "./components/GraphConnectionsTable"
 import GraphNavOutline from "./components/GraphNavOutline"
 import GraphNodeSearch from "./components/GraphNodeSearch"
+import OstimFolderField from "./components/OstimFolderField"
 import { LARGE_SCENE_NODE_THRESHOLD } from "./scene/graphLayoutClusters"
 import { pathToNode } from "./scene/spanningForest"
 import "./App.css";
@@ -54,8 +76,11 @@ import { applyRootDarkClass, readOsDarkMode, writeStoredDarkMode } from "./commo
 function makeMenuItem(label, key, icon, children, disabled, danger) {
   return { key, icon, children, label, disabled, danger };
 }
-import { tagsSFW, tagsNSFW } from "./common/Tags"
+import { tagsSFW, tagsNSFW, tagsOStimActions } from "./common/Tags"
 import TagTree from "./components/TagTree";
+import JobProgressModal from "./components/JobProgressModal";
+import AssetLibraryModal from "./components/AssetLibraryModal";
+import { stashStageNavContext } from "./common/ostimNav";
 import { remove } from "@tauri-apps/plugin-fs";
 import { save } from "@tauri-apps/plugin-dialog";
 
@@ -79,6 +104,8 @@ function App() {
   const [isDark, setIsDark] = useState(readOsDarkMode);
   const [collapsed, setCollapsed] = useState(false);  // Sider collapsed?
   const [api, contextHolder] = notification.useNotification();
+  const [jobProgress, setJobProgress] = useState(null);
+  const jobErrorCloseRef = useRef(null);
   const graphcontainer_ref = useRef(null);
   const [graph, setGraph] = useState(null);
   const [scenes, updateScenes] = useImmer([]);
@@ -86,12 +113,18 @@ function App() {
   const [packName, setPackName] = useState('');
   const [packAuthor, setPackAuthor] = useState('');
   const [packVersion, setPackVersion] = useState('');
+  // Synced from project / import events for autocomplete.
+  const [assetLibrary, setAssetLibrary] = useState(() => emptyAssetLibrary());
+  const [assetLibraryOpen, setAssetLibraryOpen] = useState(false);
   const [edited, setEditedState] = useState(false);
   const editedRef = useRef(false);
   const setEdited = (v) => {
     const next = !!v;
     editedRef.current = next;
     setEditedState(next);
+    if (next) {
+      invoke('mark_as_edited');
+    }
   };
   const [cloneToOpen, setCloneToOpen] = useState(false);
   const [cloneToStage, setCloneToStage] = useState(null);
@@ -103,39 +136,78 @@ function App() {
   const [edgeFilterMode, setEdgeFilterMode] = useState('primary'); // primary | neighborhood | family | all
   const [focusNodeIds, setFocusNodeIds] = useState([]);
   const [mapFamilyFilter, setMapFamilyFilter] = useState('all');
+  const [mapFolderFilter, setMapFolderFilter] = useState('all');
+  /** Folders created in-editor before any stage is tagged yet. */
+  const [extraFolders, setExtraFolders] = useState([]);
+  /** N-hop neighborhood when a stage is focused; Infinity = no hop dimming. */
+  const [focusHops, setFocusHops] = useState(2);
   const [navOutline, setNavOutline] = useState([]);
   const [showOutline, setShowOutline] = useState(true);
   const [pathIds, setPathIds] = useState([]);
-  const [transitionLayerMode, setTransitionLayerMode] = useState('collapsed');
-  const transitionLayerModeRef = useRef('collapsed');
   const fullGraphRef = useRef({});
   const graphMetaRef = useRef({
     families: new Map(),
     hubReturnCounts: new Map(),
     clusters: [],
     forest: null,
+    folderMap: new Map(),
   });
   const presentationCacheRef = useRef(null);
   const layoutDirtyRef = useRef(false);
   const edgeFilterModeRef = useRef(edgeFilterMode);
   const focusNodeIdsRef = useRef(focusNodeIds);
   const mapFamilyFilterRef = useRef(mapFamilyFilter);
+  const mapFolderFilterRef = useRef(mapFolderFilter);
+  const focusHopsRef = useRef(focusHops);
   const graphWorkModeRef = useRef(graphWorkMode);
   /** Packed positions at scene open (before arrange) — snap-back target. */
   const layoutSnapshotRef = useRef(null);
   const refreshGraphEdgesRef = useRef(() => {});
   const rebuildGraphPresentationRef = useRef(() => {});
+  const scheduleTopologyRebuildRef = useRef(() => {});
+  const syncStoredGraphFromCanvasRef = useRef(() => ({}));
+  const stashNavForStage = (scene, stageId) => {
+    const live =
+      syncStoredGraphFromCanvasRef.current?.() ||
+      fullGraphRef.current ||
+      scene?.graph ||
+      {};
+    stashStageNavContext(scene, stageId, live);
+  };
+  const rebuildTimerRef = useRef(null);
   const activeSceneRef = useRef(null);
+  /** Per-scene folder → Map<nodeId,{x,y}> so virtual canvas switches stay snappy. */
+  const folderLayoutCacheRef = useRef(new Map());
+  const jumpToPortalRef = useRef(() => {});
   const insertingTransitionRef = useRef(false);
   const suppressingNodeRemoveRef = useRef(false);
+  /** Click-to-connect / rewire: { cellId, portId, role:'out'|'in' } or { fixedCellId, fixedPortId, fixedRole, picking } */
+  const connectPendingRef = useRef(null);
+  const previewEdgeIdRef = useRef(null);
+  const clearConnectPendingRef = useRef(() => {});
+  /**
+   * Next new stage from the editor should land here.
+   * { x, y, connectFrom?: { nodeId, portId, role:'out'|'in' } }
+   */
+  const pendingStageDropRef = useRef(null);
+  /** Set when finishing a click-connect so the same click doesn't start a new rubber-band. */
+  const suppressConnectStartUntilRef = useRef(0);
+  /** Live copy of graphCtxMenu for pointermove / blank handlers inside the graph setup. */
+  const graphCtxMenuRef = useRef(null);
+  /** Stable connect-drop payload (survives menu close races). */
+  const connectDropIntentRef = useRef(null);
+  /** Ignore blank clicks shortly after contextmenu / connect-drop actions. */
+  const ignoreBlankClickUntilRef = useRef(0);
+  const [graphCtxMenu, setGraphCtxMenu] = useState(null);
+  const [connectHint, setConnectHint] = useState(null);
 
   useEffect(() => {
     activeSceneRef.current = activeScene;
   }, [activeScene]);
 
   useEffect(() => {
-    transitionLayerModeRef.current = transitionLayerMode;
-  }, [transitionLayerMode]);
+    graphCtxMenuRef.current = graphCtxMenu;
+  }, [graphCtxMenu]);
 
   useEffect(() => {
     edgeFilterModeRef.current = edgeFilterMode;
@@ -150,6 +222,14 @@ function App() {
   }, [mapFamilyFilter]);
 
   useEffect(() => {
+    mapFolderFilterRef.current = mapFolderFilter;
+  }, [mapFolderFilter]);
+
+  useEffect(() => {
+    focusHopsRef.current = focusHops;
+  }, [focusHops]);
+
+  useEffect(() => {
     graphWorkModeRef.current = graphWorkMode;
   }, [graphWorkMode]);
 
@@ -159,6 +239,42 @@ function App() {
     return [...new Set(fam.values())].sort();
   }, [navOutline, activeScene?.id]);
 
+  const ostimFolderOptions = useMemo(() => {
+    const map = buildFolderMap(activeScene?.stages || []);
+    const counts = folderStageCounts(map);
+    const names = [
+      ...new Set([...folderFilterOptions(map), ...extraFolders]),
+    ].sort((a, b) => a.localeCompare(b));
+    return names.map((f) => ({
+      value: f,
+      label: `Canvas: ${f} (${counts.get(f) || 0})`,
+    }));
+  }, [activeScene?.id, activeScene?.stages, extraFolders]);
+
+  const showLargeSceneTip = (activeScene?.stages?.length || 0) >= LARGE_SCENE_STAGE_WARN;
+  const showFolderTip =
+    ostimFolderOptions.length > 0 && mapFolderFilter !== 'all';
+
+  function currentNeighborhoodSet(viewGraph) {
+    const focus = focusNodeIdsRef.current || [];
+    if (!focus.length) return null;
+    const hops = focusHopsRef.current;
+    if (!Number.isFinite(hops) || hops < 0) return null;
+    return neighborhoodIds(viewGraph || {}, focus, hops);
+  }
+
+  function applyCanvasDims(graphInst, families) {
+    applyNodeFocusDim(graphInst, {
+      families,
+      familyFilter: mapFamilyFilterRef.current,
+      // Folder is a virtual canvas (subset mount), not a dim filter.
+      folderMap: graphMetaRef.current.folderMap,
+      folderFilter: 'all',
+      neighborhoodSet: currentNeighborhoodSet(
+        presentationCacheRef.current?.viewGraph || fullGraphRef.current
+      ),
+    });
+  }
   function generatePositionId() {
     return `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   }
@@ -197,12 +313,18 @@ function App() {
         // modifiers: ['ctrl']
       },
       connecting: {
+        // Drag-from-port disabled — use click-to-connect (toggle) instead.
         allowBlank: false,
         allowMulti: false,
         allowLoop: false,
         allowEdge: false,
         allowPort: true,
-        allowNode: true,
+        allowNode: false,
+        highlight: true,
+        snap: { radius: 28 },
+        validateMagnet() {
+          return false;
+        },
         createEdge() {
           return new Shape.Edge({
             shape: STAGE_EDGE_SHAPEID,
@@ -210,16 +332,253 @@ function App() {
             attrs: forwardEdgeAttrs(isDark),
           });
         },
-      }
+      },
+      highlighting: {
+        magnetAvailable: {
+          name: 'stroke',
+          args: {
+            padding: 3,
+            attrs: {
+              fill: '#ffffff',
+              stroke: '#2563eb',
+              'stroke-width': 2.5,
+            },
+          },
+        },
+        magnetAdsorbed: {
+          name: 'stroke',
+          args: {
+            padding: 4,
+            attrs: {
+              fill: '#2563eb',
+              stroke: '#1d4ed8',
+              'stroke-width': 3,
+            },
+          },
+        },
+      },
     })
       .zoomTo(1.0)
       .use(new History({
         enabled: true,
       }));
 
-    newGraph // Node Events
+    const portClickTimerRef = { current: null };
+
+    const portRole = (node, port) => {
+      const meta = (node.getPorts?.() || []).find((p) => p.id === port);
+      const g = meta?.group || '';
+      if (g === 'out') return 'out';
+      if (g === 'in') return 'in';
+      return null;
+    };
+
+    const findEdgesAtPort = (node, port, role) => {
+      return newGraph.getConnectedEdges(node).filter((ed) => {
+        if (ed.getData?.()?.preview) return false;
+        const s = ed.getSource();
+        const t = ed.getTarget();
+        const data = ed.getData?.() || {};
+        if (role === 'out') {
+          if (s.cell !== node.id) return false;
+          return s.port === port || data.slotOut === port;
+        }
+        if (t.cell !== node.id) return false;
+        return t.port === port || data.slotIn === port;
+      });
+    };
+
+    const clearConnectPending = ({ restore = false } = {}) => {
+      if (portClickTimerRef.current) {
+        clearTimeout(portClickTimerRef.current);
+        portClickTimerRef.current = null;
+      }
+      const pending = connectPendingRef.current;
+      const id = previewEdgeIdRef.current;
+      previewEdgeIdRef.current = null;
+      if (id) {
+        const pe = newGraph.getCellById(id);
+        if (pe) pe.remove();
+      }
+      if (restore && pending?.restore) {
+        const dark = !!document
+          .getElementById('root')
+          ?.classList.contains('dark-mode');
+        const r = pending.restore;
+        const via = r.viaStageId;
+        newGraph.addEdge({
+          shape: STAGE_EDGE_SHAPEID,
+          ...STAGE_EDGE,
+          source: r.source,
+          target: r.target,
+          attrs: via ? viaEdgeAttrs(dark) : forwardEdgeAttrs(dark),
+          labels: via
+            ? edgeLabelConfig(
+                r.label || shortTransitionLabel(r.viaName || ''),
+                dark
+              )
+            : [],
+          data: {
+            viaStageId: via || null,
+            viaName: r.viaName || null,
+            slotOut: r.slotOut || null,
+            slotIn: r.slotIn || null,
+          },
+        });
+        setEdited(true);
+        presentationCacheRef.current = null;
+        queueMicrotask(() => rebuildGraphPresentationRef.current?.());
+      }
+      connectPendingRef.current = null;
+      setConnectHint(null);
+      document.body.classList.remove('slsb-connecting');
+    };
+    clearConnectPendingRef.current = clearConnectPending;
+
+    const handlePortConnectClick = (node, port) => {
+      const role = portRole(node, port);
+      if (!role) return;
+      const dark = !!document
+        .getElementById('root')
+        ?.classList.contains('dark-mode');
+      const pending = connectPendingRef.current;
+
+      const makePreview = (fromRole, cellId, portId) => {
+        const box = newGraph.getCellById(cellId)?.getBBox?.() || node.getBBox();
+        const mid = {
+          x: box.x + box.width / 2,
+          y: box.y + box.height / 2,
+        };
+        const preview = newGraph.addEdge({
+          shape: STAGE_EDGE_SHAPEID,
+          ...STAGE_EDGE,
+          source:
+            fromRole === 'out' ? { cell: cellId, port: portId } : { ...mid },
+          target:
+            fromRole === 'in' ? { cell: cellId, port: portId } : { ...mid },
+          attrs: {
+            line: {
+              ...forwardEdgeAttrs(dark).line,
+              strokeDasharray: '4 4',
+              strokeOpacity: 0.65,
+              style: { pointerEvents: 'none' },
+            },
+          },
+          data: { preview: true },
+          zIndex: 20,
+        });
+        previewEdgeIdRef.current = preview.id;
+      };
+
+      if (!pending) {
+        const id = previewEdgeIdRef.current;
+        previewEdgeIdRef.current = null;
+        if (id) {
+          const pe = newGraph.getCellById(id);
+          if (pe) pe.remove();
+        }
+        connectPendingRef.current = { cellId: node.id, portId: port, role };
+        setConnectHint(
+          role === 'out'
+            ? 'Click a stage or its blue input — right-click empty canvas → Create stage here (Esc cancels)'
+            : 'Click a stage or its green output — right-click empty canvas → Create stage here (Esc cancels)'
+        );
+        document.body.classList.add('slsb-connecting');
+        makePreview(role, node.id, port);
+        return;
+      }
+
+      let source;
+      let target;
+      let viaStageId = pending.viaStageId || null;
+      let viaName = pending.viaName || null;
+      let label = pending.label || '';
+      let slotOut = pending.slotOut || null;
+      let slotIn = pending.slotIn || null;
+
+      if (pending.fixedCellId) {
+        if (role !== pending.picking) return;
+        if (pending.fixedRole === 'out') {
+          source = { cell: pending.fixedCellId, port: pending.fixedPortId };
+          target = { cell: node.id, port };
+          slotOut = slotOut || pending.fixedPortId;
+          slotIn = port;
+        } else {
+          source = { cell: node.id, port };
+          target = { cell: pending.fixedCellId, port: pending.fixedPortId };
+          slotOut = port;
+          slotIn = slotIn || pending.fixedPortId;
+        }
+      } else if (pending.role === role) {
+        const id = previewEdgeIdRef.current;
+        previewEdgeIdRef.current = null;
+        if (id) {
+          const pe = newGraph.getCellById(id);
+          if (pe) pe.remove();
+        }
+        connectPendingRef.current = { cellId: node.id, portId: port, role };
+        makePreview(role, node.id, port);
+        return;
+      } else if (pending.role === 'out' && role === 'in') {
+        source = { cell: pending.cellId, port: pending.portId };
+        target = { cell: node.id, port };
+        slotOut = pending.portId;
+        slotIn = port;
+      } else if (pending.role === 'in' && role === 'out') {
+        source = { cell: node.id, port };
+        target = { cell: pending.cellId, port: pending.portId };
+        slotOut = port;
+        slotIn = pending.portId;
+      } else {
+        return;
+      }
+
+      if (source.cell === target.cell) {
+        clearConnectPending({ restore: false });
+        return;
+      }
+
+      const id = previewEdgeIdRef.current;
+      previewEdgeIdRef.current = null;
+      if (id) {
+        const pe = newGraph.getCellById(id);
+        if (pe) pe.remove();
+      }
+      connectPendingRef.current = null;
+      setConnectHint(null);
+      document.body.classList.remove('slsb-connecting');
+      // Finishing often also hits port:click with pending=null and would start again.
+      suppressConnectStartUntilRef.current = Date.now() + 400;
+
+      const created = newGraph.addEdge({
+        shape: STAGE_EDGE_SHAPEID,
+        ...STAGE_EDGE,
+        source,
+        target,
+        attrs: viaStageId ? viaEdgeAttrs(dark) : forwardEdgeAttrs(dark),
+        labels: viaStageId
+          ? edgeLabelConfig(
+              label || shortTransitionLabel(viaName || ''),
+              dark
+            )
+          : [],
+        data: {
+          viaStageId: viaStageId || null,
+          viaName: viaName || null,
+          slotOut: slotOut || null,
+          slotIn: slotIn || null,
+        },
+      });
+      if (typeof created?.setVisible === 'function') created.setVisible(true);
+      setEdited(true);
+      scheduleTopologyRebuildRef.current?.([source.cell, target.cell]);
+    };
+
+
+    newGraph
       .on("node:removed", ({ node }) => {
         if (inEdit.current || suppressingNodeRemoveRef.current) return;
+        if (node.prop('isPortal') || isPortalNodeId(node.id)) return;
         updateActiveScene(prev => {
           if (prev.root === node.id) {
             prev.root = null;
@@ -257,6 +616,7 @@ function App() {
         const scene = activeSceneRef.current;
         const stage = scene?.stages?.find((s) => s.id === via);
         if (!stage || !scene) return;
+        stashNavForStage(scene, stage.id);
         invoke('open_stage_editor', {
           sceneId: scene.id,
           positions: scene.positions || [],
@@ -265,111 +625,57 @@ function App() {
           templateStage: null,
         });
       })
-      .on("edge:contextmenu", ({ e, edge }) => {
-        e.stopPropagation();
-        const via = edge.getData?.()?.viaStageId;
-        const viaName = edge.getData?.()?.viaName;
-        confirm({
-          title: via ? 'Remove transition connection?' : 'Remove connection?',
-          content: via
-            ? `This link goes through "${viaName || via}". Remove the connection?`
-            : 'Delete this edge between poses?',
-          okText: 'Remove',
-          cancelText: 'Cancel',
-          onOk() {
-            edge.remove();
-            setEdited(true);
-            if (via && activeSceneRef.current) {
-              confirm({
-                title: 'Remove transition stage?',
-                content: `Also delete transition "${viaName || via}" from the scene?`,
-                okText: 'Delete transition',
-                cancelText: 'Keep stage',
-                onOk() {
-                  updateActiveScene((prev) => {
-                    prev.stages = (prev.stages || []).filter((s) => s.id !== via);
-                  });
-                  const g = fullGraphRef.current || {};
-                  delete g[via];
-                  for (const id of Object.keys(g)) {
-                    g[id].dest = (g[id].dest || []).filter((d) => d !== via);
-                  }
-                  fullGraphRef.current = g;
-                  presentationCacheRef.current = null;
-                  queueMicrotask(() => rebuildGraphPresentationRef.current?.());
-                },
-                onCancel() {
-                  presentationCacheRef.current = null;
-                  queueMicrotask(() => rebuildGraphPresentationRef.current?.());
-                },
-              });
-            } else {
-              presentationCacheRef.current = null;
-              queueMicrotask(() => rebuildGraphPresentationRef.current?.());
-            }
+      .on("edge:mouseenter", ({ edge }) => {
+        if (edge.getData?.()?.preview) return;
+        const line = edge.attr('line') || {};
+        edge.setProp(
+          'edgeHoverBase',
+          {
+            strokeWidth: line.strokeWidth,
+            stroke: line.stroke,
           },
+          { silent: true }
+        );
+        const dark = !!document.getElementById('root')?.classList.contains('dark-mode');
+        const patch = edgeHoverLinePatch(edge.getData?.() || {}, dark);
+        edge.attr('line/strokeWidth', patch.strokeWidth);
+        edge.attr('line/stroke', patch.stroke);
+      })
+      .on("edge:mouseleave", ({ edge }) => {
+        const base = edge.prop('edgeHoverBase') || edge.prop('viaHoverBase');
+        if (!base) return;
+        if (base.strokeWidth != null) edge.attr('line/strokeWidth', base.strokeWidth);
+        if (base.stroke != null) edge.attr('line/stroke', base.stroke);
+        edge.setProp('edgeHoverBase', null, { silent: true });
+        edge.setProp('viaHoverBase', null, { silent: true });
+      })
+      .on("edge:contextmenu", ({ e, edge }) => {
+        e.preventDefault?.();
+        e.stopPropagation();
+        if (edge.getData?.()?.preview) return;
+        const data = edge.getData?.() || {};
+        setGraphCtxMenu({
+          kind: 'edge',
+          x: e.clientX,
+          y: e.clientY,
+          edgeId: edge.id,
+          via: data.viaStageId || null,
+          bridgeTargetId: data.bridgeTargetId || null,
+          bridgeSourceId: data.bridgeSourceId || null,
+          bridgeFolder: data.bridgeFolder || null,
         });
       })
       .on("edge:connected", ({ edge }) => {
         if (inEdit.current || insertingTransitionRef.current) return;
+        if (edge.getData?.()?.preview) return;
         setEdited(true);
-        if (transitionLayerModeRef.current !== 'collapsed') {
-          presentationCacheRef.current = null;
-          queueMicrotask(() => rebuildGraphPresentationRef.current?.());
-          return;
-        }
-        const source = edge.getSourceCellId();
-        const target = edge.getTargetCellId();
-        confirm({
-          title: 'Insert transition stage?',
-          content:
-            'Create a fixed-length transition between these poses (OStim-style), or keep a direct link?',
-          okText: 'Insert transition',
-          cancelText: 'Direct link',
-          onOk() {
-            insertingTransitionRef.current = true;
-            const scene = activeSceneRef.current;
-            if (!scene || !source || !target) {
-              insertingTransitionRef.current = false;
-              return;
-            }
-            const id = Math.random().toString(36).slice(2, 10);
-            const tgtName =
-              scene.stages?.find((s) => s.id === target)?.name || 'Pose';
-            const short = shortTransitionLabel(tgtName);
-            const newStage = {
-              id,
-              name: `Go to ${short}`,
-              positions: JSON.parse(
-                JSON.stringify(
-                  scene.stages?.find((s) => s.id === source)?.positions || []
-                )
-              ),
-              tags: ['transition'],
-              extra: { fixed_len: 1, nav_text: '', sound: '' },
-            };
-            updateActiveScene((prev) => {
-              prev.stages = [...(prev.stages || []), newStage];
-            });
-            edge.setData({ viaStageId: id, viaName: newStage.name });
-            edge.setLabels([
-              {
-                attrs: {
-                  label: { text: shortTransitionLabel(newStage.name), fontSize: 11 },
-                },
-              },
-            ]);
-            insertingTransitionRef.current = false;
-            presentationCacheRef.current = null;
-            queueMicrotask(() => rebuildGraphPresentationRef.current?.());
-          },
-          onCancel() {
-            presentationCacheRef.current = null;
-            queueMicrotask(() => rebuildGraphPresentationRef.current?.());
-          },
-        });
+        // Keep the new edge visible immediately; polish routing shortly after.
+        if (typeof edge.setVisible === 'function') edge.setVisible(true);
+        scheduleTopologyRebuildRef.current?.([
+          edge.getSourceCellId(),
+          edge.getTargetCellId(),
+        ]);
       })
-      // Custom Events
       .on("node:doMarkRoot", ({ node }) => {
         updateActiveScene(prev => {
           const cell = newGraph.getCellById(prev.root);
@@ -388,6 +694,7 @@ function App() {
           live && belonging && live.id === belonging.id ? live : belonging;
         const stage =
           scene?.stages?.find((s) => s.id === node.id) || node.prop('stage');
+        stashNavForStage(scene, stage?.id);
         invoke('open_stage_editor_from', {
           sceneId: scene.id,
           positions: scene.positions || [],
@@ -408,7 +715,43 @@ function App() {
         setCloneToTargetId(null);
         setCloneToOpen(true);
       })
-      .on('node:click', ({ node }) => {
+      .on('node:click', ({ e, node }) => {
+        setGraphCtxMenu(null);
+        // Port clicks finish via node:port:click; skipping here avoids a
+        // double-finish that then starts a new connection from the entry port.
+        if (
+          connectPendingRef.current &&
+          e?.target?.closest?.('.x6-port, .x6-port-body')
+        ) {
+          return;
+        }
+        // Finish a pending link by clicking the target node (default spare port).
+        const pending = connectPendingRef.current;
+        if (
+          pending &&
+          !pending.fixedCellId &&
+          pending.cellId &&
+          pending.cellId !== node.id &&
+          !(node.prop('isPortal') || isPortalNodeId(node.id))
+        ) {
+          const wantGroup = pending.role === 'out' ? 'in' : 'out';
+          const ports = node.getPorts?.() || [];
+          const pick =
+            ports.find((p) => p.group === wantGroup) ||
+            ports.find((p) =>
+              wantGroup === 'in'
+                ? String(p.group || '').startsWith('in')
+                : String(p.group || '').startsWith('out')
+            );
+          if (pick?.id) {
+            handlePortConnectClick(node, pick.id);
+            return;
+          }
+        }
+        if (node.prop('isPortal') || isPortalNodeId(node.id)) {
+          queueMicrotask(() => jumpToPortalRef.current?.(node));
+          return;
+        }
         setFocusNodeIds([node.id]);
         focusNodeIdsRef.current = [node.id];
         const forest = graphMetaRef.current.forest;
@@ -417,9 +760,266 @@ function App() {
         }
         queueMicrotask(() => refreshGraphEdgesRef.current?.());
       })
+      .on('node:contextmenu', ({ e, node }) => {
+        e.preventDefault?.();
+        e.stopPropagation();
+        const isPortal = !!(node.prop('isPortal') || isPortalNodeId(node.id));
+        setFocusNodeIds(isPortal ? [] : [node.id]);
+        if (!isPortal) focusNodeIdsRef.current = [node.id];
+        setGraphCtxMenu({
+          kind: isPortal ? 'portal' : 'node',
+          x: e.clientX,
+          y: e.clientY,
+          nodeId: node.id,
+          portalStageId: node.prop('portalStageId') || stageIdFromPortal(node.id),
+          portalFolder: node.prop('portalFolder') || '',
+          ostimFolder: node.prop('ostimFolder') || '',
+        });
+      })
+      .on('node:portalJump', ({ node }) => {
+        jumpToPortalRef.current?.(node);
+      })
+      .on('blank:click', () => {
+        if (Date.now() < ignoreBlankClickUntilRef.current) return;
+        // Keep rubber-band + drop intent while the connect context menu is open.
+        if (graphCtxMenuRef.current?.kind === 'connect-drop') return;
+        setGraphCtxMenu(null);
+        connectDropIntentRef.current = null;
+        clearConnectPending({ restore: true });
+      })
+      .on('blank:contextmenu', ({ e }) => {
+        e.preventDefault?.();
+        e.stopPropagation();
+        // Avoid the browser's follow-up click canceling the rubber-band link.
+        ignoreBlankClickUntilRef.current = Date.now() + 800;
+        let graphX = 40;
+        let graphY = 40;
+        try {
+          const local = newGraph.clientToLocal(e.clientX, e.clientY);
+          graphX = local.x;
+          graphY = local.y;
+        } catch (_) { /* ignore */ }
+        const pending = connectPendingRef.current;
+        // Port was clicked earlier: drop a new stage at the cursor and link it.
+        if (
+          pending?.cellId &&
+          pending?.role &&
+          !pending?.fixedCellId &&
+          !pending?.picking
+        ) {
+          // Freeze the preview at the right-click point while the menu is open.
+          const previewId = previewEdgeIdRef.current;
+          if (previewId) {
+            const pe = newGraph.getCellById(previewId);
+            if (pe) {
+              const local = { x: graphX, y: graphY };
+              if (pending.role === 'out' || pending.fixedRole === 'out') {
+                pe.setTarget(local);
+              } else {
+                pe.setSource(local);
+              }
+            }
+          }
+          const intent = {
+            graphX,
+            graphY,
+            connectFrom: {
+              nodeId: pending.cellId,
+              portId: pending.portId,
+              role: pending.role,
+            },
+          };
+          connectDropIntentRef.current = intent;
+          setGraphCtxMenu({
+            kind: 'connect-drop',
+            x: e.clientX,
+            y: e.clientY,
+            ...intent,
+          });
+          return;
+        }
+        connectDropIntentRef.current = null;
+        setGraphCtxMenu({
+          kind: 'blank',
+          x: e.clientX,
+          y: e.clientY,
+          graphX,
+          graphY,
+        });
+      })
+      .on('node:port:click', ({ e, node, port }) => {
+        e?.preventDefault?.();
+        e?.stopPropagation?.();
+        setGraphCtxMenu(null);
+        if (!portRole(node, port)) return;
+
+        const run = () => handlePortConnectClick(node, port);
+        if (connectPendingRef.current) {
+          if (portClickTimerRef.current) {
+            clearTimeout(portClickTimerRef.current);
+            portClickTimerRef.current = null;
+          }
+          run();
+          return;
+        }
+        if (Date.now() < suppressConnectStartUntilRef.current) return;
+        if (portClickTimerRef.current) clearTimeout(portClickTimerRef.current);
+        portClickTimerRef.current = setTimeout(() => {
+          portClickTimerRef.current = null;
+          if (Date.now() < suppressConnectStartUntilRef.current) return;
+          if (connectPendingRef.current) return;
+          run();
+        }, 220);
+      })
+      .on('node:port:dblclick', ({ e, node, port }) => {
+        e?.preventDefault?.();
+        e?.stopPropagation?.();
+        setGraphCtxMenu(null);
+        if (portClickTimerRef.current) {
+          clearTimeout(portClickTimerRef.current);
+          portClickTimerRef.current = null;
+        }
+        const role = portRole(node, port);
+        if (!role) return;
+
+        if (connectPendingRef.current) {
+          clearConnectPending({ restore: true });
+        }
+
+        let connected = findEdgesAtPort(node, port, role);
+        if (!connected.length) {
+          const dir = newGraph.getConnectedEdges(node).filter((ed) => {
+            if (ed.getData?.()?.preview) return false;
+            const s = ed.getSource();
+            const t = ed.getTarget();
+            return role === 'out' ? s.cell === node.id : t.cell === node.id;
+          });
+          if (dir.length === 1) connected = dir;
+        }
+        if (!connected.length) return;
+
+        const edge = connected[0];
+        const src = edge.getSource();
+        const tgt = edge.getTarget();
+        const data = edge.getData?.() || {};
+        const via = data.viaStageId || null;
+        const viaName = data.viaName || null;
+        const label =
+          (edge.getLabels?.()?.[0]?.attrs?.label?.text) ||
+          shortTransitionLabel(viaName || '');
+        const dark = !!document
+          .getElementById('root')
+          ?.classList.contains('dark-mode');
+
+        // Detach the clicked end; keep the other end fixed for reattach.
+        const detachSource = role === 'out';
+        const fixedCellId = detachSource ? tgt.cell : src.cell;
+        const fixedPortId = detachSource ? tgt.port : src.port;
+        const fixedRole = detachSource ? 'in' : 'out';
+        const picking = detachSource ? 'out' : 'in';
+
+        edge.remove();
+        setEdited(true);
+
+        clearConnectPending({ restore: false });
+        connectPendingRef.current = {
+          fixedCellId,
+          fixedPortId,
+          fixedRole,
+          picking,
+          viaStageId: via,
+          viaName,
+          label,
+          slotOut: data.slotOut || src.port || null,
+          slotIn: data.slotIn || tgt.port || null,
+          restore: {
+            source: { cell: src.cell, port: src.port },
+            target: { cell: tgt.cell, port: tgt.port },
+            viaStageId: via,
+            viaName,
+            label,
+            slotOut: data.slotOut || null,
+            slotIn: data.slotIn || null,
+          },
+        };
+        setConnectHint(
+          picking === 'in'
+            ? 'Click an input port to reattach (Esc cancels)'
+            : 'Click an output port to reattach (Esc cancels)'
+        );
+        document.body.classList.add('slsb-connecting');
+        const box = newGraph.getCellById(fixedCellId)?.getBBox?.() || {
+          x: 0,
+          y: 0,
+          width: 0,
+          height: 0,
+        };
+        const loose = {
+          x: box.x + box.width / 2,
+          y: box.y + box.height / 2,
+        };
+        const preview = newGraph.addEdge({
+          shape: STAGE_EDGE_SHAPEID,
+          ...STAGE_EDGE,
+          source:
+            fixedRole === 'out'
+              ? { cell: fixedCellId, port: fixedPortId }
+              : { ...loose },
+          target:
+            fixedRole === 'in'
+              ? { cell: fixedCellId, port: fixedPortId }
+              : { ...loose },
+          attrs: {
+            line: {
+              ...(via ? viaEdgeAttrs(dark) : forwardEdgeAttrs(dark)).line,
+              strokeDasharray: '4 4',
+              strokeOpacity: 0.65,
+              style: { pointerEvents: 'none' },
+            },
+          },
+          data: { preview: true },
+          zIndex: 20,
+        });
+        previewEdgeIdRef.current = preview.id;
+      });
+
+    const onConnectPointerMove = (ev) => {
+      // Freeze rubber-band while any graph context menu is open.
+      if (graphCtxMenuRef.current) return;
+      const id = previewEdgeIdRef.current;
+      if (!id || !connectPendingRef.current) return;
+      const edge = newGraph.getCellById(id);
+      if (!edge) return;
+      const local = newGraph.clientToLocal(ev.clientX, ev.clientY);
+      const pending = connectPendingRef.current;
+      if (pending.fixedRole === 'out' || pending.role === 'out') {
+        edge.setTarget(local);
+      } else {
+        edge.setSource(local);
+      }
+    };
+    const onConnectKeyDown = (ev) => {
+      if (ev.key !== 'Escape') return;
+      connectDropIntentRef.current = null;
+      setGraphCtxMenu(null);
+      clearConnectPending({ restore: true });
+    };
+    window.addEventListener('pointermove', onConnectPointerMove);
+    window.addEventListener('keydown', onConnectKeyDown);
 
     setGraph(newGraph);
     return () => {
+      if (portClickTimerRef.current) {
+        clearTimeout(portClickTimerRef.current);
+        portClickTimerRef.current = null;
+      }
+      if (rebuildTimerRef.current) {
+        clearTimeout(rebuildTimerRef.current);
+        rebuildTimerRef.current = null;
+      }
+      window.removeEventListener('pointermove', onConnectPointerMove);
+      window.removeEventListener('keydown', onConnectKeyDown);
+      document.body.classList.remove('slsb-connecting');
       newGraph.dispose();
       if (graphcontainer_ref.current) {
         graphcontainer_ref.current.innerHTML = '';
@@ -439,6 +1039,10 @@ function App() {
     if (!graph) return;
 
     const editStage = (node) => {
+      if (node?.prop?.('isPortal') || isPortalNodeId(node?.id)) {
+        jumpToPortalRef.current?.(node);
+        return;
+      }
       // Live stage from activeScene — node.prop('stage') lags when actors are
       // added via another stage in this animation.
       let stage =
@@ -447,6 +1051,7 @@ function App() {
       console.log("Editing stage", stage, "in scene", activeScene);
 
       console.assert(activeScene.stages.findIndex(it => it.id === stage.id) > -1, "Editing stage that does not belong to active scene: ", stage, activeScene);
+      stashNavForStage(activeScene, stage.id);
       invoke('open_stage_editor', {
         sceneId: activeScene.id,
         positions: activeScene.positions || [],
@@ -469,9 +1074,7 @@ function App() {
     }
   }, [graph, activeScene])
 
-  // Stage & Scene update
   useEffect(() => {
-    // Callback after stage has been saved in other window
     const stage_save = listen('on_stage_saved', (event) => {
       const { scene, positions, stage } = event.payload;
       console.log("Saving new stage in ", scene, positions, stage);
@@ -484,8 +1087,16 @@ function App() {
       if (updatingActiveScene) {
         const nodes = graph.getNodes();
         node = nodes.find((n) => n.id === stage.id);
-        if (!node) node = addStageToGraph(stage);
-        updateNodeProps(stage, node, activeScene);
+        // Collapsed transitions live as via-edges, not canvas nodes.
+        if (!node && !isTransitionStage(stage)) {
+          const drop = pendingStageDropRef.current;
+          node = addStageToGraph(
+            stage,
+            Number.isFinite(drop?.x) ? drop.x : undefined,
+            Number.isFinite(drop?.y) ? drop.y : undefined
+          );
+        }
+        if (node) updateNodeProps(stage, node, activeScene);
         updatedScene = activeScene;
       } else {
         updatedSceneIdx = scenes.findIndex((it) => it.id === sceneId);
@@ -518,6 +1129,18 @@ function App() {
         }
       }
       updatedScene = structuredClone(updatedScene);
+      // Inherit active canvas folder when authoring a pack split.
+      const canvasFolder = mapFolderFilterRef.current;
+      if (
+        canvasFolder &&
+        canvasFolder !== 'all' &&
+        !stageOstimFolder(stage)
+      ) {
+        stage.tags = tagsWithOstimFolder(stage.tags || [], canvasFolder);
+      }
+      if (node && !isPortalNodeId(node.id)) {
+        node.prop('ostimFolder', stageOstimFolder(stage) || '');
+      }
       let editedStageIdx =
         updatedScene.stages?.findIndex((it) => it.id === stage.id) ?? -1;
       if (editedStageIdx === -1) {
@@ -527,30 +1150,75 @@ function App() {
           if (node) node.prop('isStart', true);
           updatedScene.root = stage.id;
         }
-        // Always ensure graph placement for non-active destinations (and for
-        // active ones the X6 node already exists).
-        if (!updatingActiveScene) {
-          const g = { ...(updatedScene.graph || {}) };
-          if (!g[stage.id]) {
-            const count = Object.keys(g).length;
-            g[stage.id] = {
-              dest: [],
-              x: 40 + (count % 4) * 220,
-              y: 40 + Math.floor(count / 4) * 140,
+        const drop = pendingStageDropRef.current;
+        // Prefer live canvas topology — activeScene.graph is often stale until save.
+        const g = structuredClone(
+          fullGraphRef.current || updatedScene.graph || {}
+        );
+        if (!g[stage.id]) {
+          const count = Object.keys(g).length;
+          g[stage.id] = {
+            dest: [],
+            x: Number.isFinite(drop?.x)
+              ? drop.x
+              : 40 + (count % 4) * 220,
+            y: Number.isFinite(drop?.y)
+              ? drop.y
+              : 40 + Math.floor(count / 4) * 140,
+          };
+        } else if (Number.isFinite(drop?.x) && Number.isFinite(drop?.y)) {
+          g[stage.id] = {
+            ...g[stage.id],
+            x: drop.x,
+            y: drop.y,
+            dest: [...(g[stage.id].dest || [])],
+          };
+        }
+        const link = drop?.connectFrom;
+        if (link?.nodeId && link.nodeId !== stage.id) {
+          if (!g[link.nodeId]) {
+            g[link.nodeId] = { dest: [], x: 40, y: 40 };
+          } else {
+            g[link.nodeId] = {
+              ...g[link.nodeId],
+              dest: [...(g[link.nodeId].dest || [])],
             };
           }
-          updatedScene.graph = g;
-          if (!updatedScene.root) {
-            updatedScene.root = stage.id;
+          if (!g[stage.id].dest) g[stage.id].dest = [];
+          if (link.role === 'out') {
+            if (!g[link.nodeId].dest.includes(stage.id)) {
+              g[link.nodeId].dest.push(stage.id);
+            }
+          } else if (link.role === 'in') {
+            if (!g[stage.id].dest.includes(link.nodeId)) {
+              g[stage.id].dest.push(link.nodeId);
+            }
           }
         }
+        updatedScene.graph = g;
+        if (updatingActiveScene) {
+          fullGraphRef.current = g;
+        }
+        if (!updatedScene.root) {
+          updatedScene.root = stage.id;
+        }
+        pendingStageDropRef.current = null;
       } else {
         updatedScene.stages[editedStageIdx] = stage;
+        pendingStageDropRef.current = null;
       }
       updatedScene.positions = positions;
       if (updatingActiveScene) {
+        if (activeSceneRef.current?.id === updatedScene.id) {
+          activeSceneRef.current = updatedScene;
+        }
         updateActiveScene(updatedScene);
         setEdited(true);
+        presentationCacheRef.current = null;
+        // skipSync: canvas may not have the new edge yet; fullGraphRef is authority.
+        queueMicrotask(() =>
+          rebuildGraphPresentationRef.current?.({ skipSync: true })
+        );
       } else {
         invoke('save_scene', { scene: updatedScene })
           .then(() => {
@@ -650,6 +1318,74 @@ function App() {
 
   useEffect(() => {
     if (!graph) return;
+    const unlistenJob = listen('on_job_progress', (event) => {
+      const p = event.payload || {};
+      if (jobErrorCloseRef.current) {
+        clearTimeout(jobErrorCloseRef.current);
+        jobErrorCloseRef.current = null;
+      }
+      if (p.done) {
+        if (p.error) {
+          setJobProgress({
+            title: p.title || 'Failed',
+            message: p.message || '',
+            current: p.current ?? null,
+            total: p.total ?? null,
+            error: p.error,
+          });
+          jobErrorCloseRef.current = setTimeout(() => {
+            setJobProgress(null);
+            jobErrorCloseRef.current = null;
+          }, 1800);
+          return;
+        }
+        setJobProgress(null);
+        return;
+      }
+      setJobProgress({
+        title: p.title || 'Working…',
+        message: p.message || '',
+        current: p.current ?? null,
+        total: p.total ?? null,
+        error: null,
+      });
+    });
+    const applyAssetLibrary = (raw, { seedIfEmpty = false } = {}) => {
+      let lib = normalizeAssetLibrary(raw);
+      const isEmpty =
+        !lib.events.length &&
+        !lib.anim_objects.length &&
+        !lib.equip_objects.length &&
+        !lib.icons.length;
+      if (seedIfEmpty && isEmpty) {
+        const global = loadGlobalAssetLibrary();
+        const hasGlobal =
+          global.events.length ||
+          global.anim_objects.length ||
+          global.equip_objects.length ||
+          global.icons.length;
+        if (hasGlobal) {
+          invoke('set_asset_library', { library: global })
+            .then((merged) => {
+              const next = normalizeAssetLibrary(merged);
+              setAssetLibrary(next);
+              mergeGlobalAssetLibrary(next);
+            })
+            .catch((err) => console.error('Failed to seed asset library', err));
+          setAssetLibrary(global);
+          return;
+        }
+      }
+      setAssetLibrary(lib);
+      mergeGlobalAssetLibrary(lib);
+    };
+
+    const unlistenLib = listen('on_asset_library_update', (event) => {
+      applyAssetLibrary(event.payload);
+    });
+    const unlistenManageLib = listen('on_manage_asset_library', () => {
+      setAssetLibraryOpen(true);
+    });
     const unlisten = listen('on_project_update', (event) => {
       const payload = event.payload || {};
       const stage_map = payload.scenes ?? payload;
@@ -661,6 +1397,19 @@ function App() {
         }
       }
       console.log("Opening new Project with Scenes: ", scns);
+      setJobProgress((prev) => {
+        // Startup `request_project_update` has no in-flight job — don't flash a modal.
+        if (!prev) return null;
+        return {
+          title: payload.pack_name
+            ? `Loading ${payload.pack_name}`
+            : prev.title || 'Loading project',
+          message: 'Loading scenes into editor…',
+          current: null,
+          total: null,
+          error: null,
+        };
+      });
       for (const scene of scns) {
         disambiguateDuplicateStageNames(scene.stages || []);
       }
@@ -668,6 +1417,10 @@ function App() {
       setPackName(payload.pack_name ?? '');
       setPackAuthor(payload.pack_author ?? '');
       setPackVersion(payload.pack_version ?? '');
+      // New / empty packs get global history so autocomplete works immediately.
+      applyAssetLibrary(payload.asset_library, {
+        seedIfEmpty: scns.length === 0,
+      });
       setEdited(false);
       if (scns.length) {
         // Show side panels before loading the scene so graph fit uses the
@@ -678,10 +1431,24 @@ function App() {
         updateActiveScene(null);
         setShowAreas(false);
       }
+      // Drop the modal after React has a chance to start mounting the graph.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setJobProgress((prev) =>
+            prev?.message === 'Loading scenes into editor…' ? null : prev
+          );
+        });
+      });
     });
     invoke('request_project_update');
     return () => {
-      unlisten.then(res => { res() });
+      unlistenJob.then((res) => { res(); });
+      unlistenLib.then((res) => { res(); });
+      unlistenManageLib.then((res) => { res(); });
+      unlisten.then((res) => { res(); });
+      if (jobErrorCloseRef.current) {
+        clearTimeout(jobErrorCloseRef.current);
+      }
     }
   }, [graph])
 
@@ -699,6 +1466,178 @@ function App() {
       }
     })
   }
+
+  useEffect(() => {
+    if (!graphCtxMenu) return;
+    const close = (ev) => {
+      if (ev?.target?.closest?.('.graph-ctx-menu')) return;
+      if (graphCtxMenu.kind === 'connect-drop') {
+        connectDropIntentRef.current = null;
+        clearConnectPendingRef.current?.({ restore: true });
+      }
+      setGraphCtxMenu(null);
+    };
+    // Defer so the opening contextmenu doesn't immediately close via a leftover click.
+    const t = window.setTimeout(() => {
+      window.addEventListener('click', close);
+      window.addEventListener('contextmenu', close);
+    }, 0);
+    return () => {
+      window.clearTimeout(t);
+      window.removeEventListener('click', close);
+      window.removeEventListener('contextmenu', close);
+    };
+  }, [graphCtxMenu]);
+
+  const rebuildSoonFromCtx = () => {
+    presentationCacheRef.current = null;
+    queueMicrotask(() => rebuildGraphPresentationRef.current?.());
+  };
+
+  const onEdgeCtxConvert = () => {
+    const menu = graphCtxMenu;
+    setGraphCtxMenu(null);
+    if (!menu || menu.kind === 'node' || menu.kind === 'blank' || menu.kind === 'portal') return;
+    if (menu.via || !graph) return;
+    const edge = graph.getCellById(menu.edgeId);
+    if (!edge || edge.getData?.()?.preview) return;
+    insertingTransitionRef.current = true;
+    const scene = activeSceneRef.current;
+    const source = edge.getSourceCellId();
+    const target = edge.getTargetCellId();
+    if (!scene || !source || !target) {
+      insertingTransitionRef.current = false;
+      return;
+    }
+    const dark = !!document.getElementById('root')?.classList.contains('dark-mode');
+    const id = Math.random().toString(36).slice(2, 10);
+    const tgtName =
+      scene.stages?.find((s) => s.id === target)?.name || 'Pose';
+    const short = shortTransitionLabel(tgtName);
+    const newStage = {
+      id,
+      name: `Go to ${short}`,
+      positions: JSON.parse(
+        JSON.stringify(
+          scene.stages?.find((s) => s.id === source)?.positions || []
+        )
+      ),
+      tags: ['transition'],
+      extra: { fixed_len: 1, nav_text: short, sound: '' },
+    };
+    const nextStages = [...(scene.stages || []), newStage];
+    if (activeSceneRef.current) {
+      activeSceneRef.current = {
+        ...activeSceneRef.current,
+        stages: nextStages,
+      };
+    }
+    updateActiveScene((prev) => {
+      prev.stages = nextStages;
+    });
+    const data = edge.getData?.() || {};
+    edge.setData({
+      ...data,
+      viaStageId: id,
+      viaName: newStage.name,
+    });
+    edge.attr('line', viaEdgeAttrs(dark).line);
+    edge.setLabels(edgeLabelConfig(short, dark));
+    insertingTransitionRef.current = false;
+    setEdited(true);
+    rebuildSoonFromCtx();
+  };
+
+  const onEdgeCtxRevert = () => {
+    const menu = graphCtxMenu;
+    setGraphCtxMenu(null);
+    if (!menu?.edgeId || !menu?.via || !graph) return;
+    const edge = graph.getCellById(menu.edgeId);
+    if (!edge) return;
+    const via = menu.via;
+    const scene = activeSceneRef.current;
+    if (!scene) return;
+    const dark = !!document.getElementById('root')?.classList.contains('dark-mode');
+    const nextStages = (scene.stages || []).filter((s) => s.id !== via);
+    if (activeSceneRef.current) {
+      activeSceneRef.current = {
+        ...activeSceneRef.current,
+        stages: nextStages,
+      };
+    }
+    updateActiveScene((prev) => {
+      prev.stages = nextStages;
+    });
+    const g = { ...(fullGraphRef.current || {}) };
+    delete g[via];
+    for (const id of Object.keys(g)) {
+      g[id] = {
+        ...g[id],
+        dest: (g[id].dest || []).filter((d) => d !== via),
+      };
+    }
+    fullGraphRef.current = g;
+    const data = edge.getData?.() || {};
+    edge.setData({
+      ...data,
+      viaStageId: null,
+      viaName: null,
+    });
+    edge.attr('line', forwardEdgeAttrs(dark).line);
+    edge.setLabels([]);
+    setEdited(true);
+    rebuildSoonFromCtx();
+  };
+
+  const onEdgeCtxEdit = () => {
+    const menu = graphCtxMenu;
+    setGraphCtxMenu(null);
+    if (!menu?.via) return;
+    const scene = activeSceneRef.current;
+    const stage = scene?.stages?.find((s) => s.id === menu.via);
+    if (!stage || !scene) return;
+    stashNavForStage(scene, stage.id);
+    invoke('open_stage_editor', {
+      sceneId: scene.id,
+      positions: scene.positions || [],
+      stage,
+      existingStageCount: scene.stages?.length || 0,
+      templateStage: null,
+    });
+  };
+
+  const onEdgeCtxDelete = () => {
+    const menu = graphCtxMenu;
+    setGraphCtxMenu(null);
+    if (!menu?.edgeId || !graph) return;
+    const edge = graph.getCellById(menu.edgeId);
+    if (!edge) return;
+    const via = menu.via;
+    edge.remove();
+    if (via && activeSceneRef.current) {
+      const nextStages = (activeSceneRef.current.stages || []).filter(
+        (s) => s.id !== via
+      );
+      activeSceneRef.current = {
+        ...activeSceneRef.current,
+        stages: nextStages,
+      };
+      updateActiveScene((prev) => {
+        prev.stages = nextStages;
+      });
+      const g = { ...(fullGraphRef.current || {}) };
+      delete g[via];
+      for (const id of Object.keys(g)) {
+        g[id] = {
+          ...g[id],
+          dest: (g[id].dest || []).filter((d) => d !== via),
+        };
+      }
+      fullGraphRef.current = g;
+    }
+    setEdited(true);
+    rebuildSoonFromCtx();
+  };
 
   const setActiveScene = async (newscene) => {
     if (!inEdit.current && editedRef.current) {
@@ -754,12 +1693,40 @@ function App() {
     focusNodeIdsRef.current = [];
     setPathIds([]);
     setMapFamilyFilter('all');
+    mapFamilyFilterRef.current = 'all';
+    setFocusHops(2);
+    focusHopsRef.current = 2;
     presentationCacheRef.current = null;
+    folderLayoutCacheRef.current = new Map();
+    setExtraFolders([]);
+
+    const folderMap = buildFolderMap(newscene.stages || []);
+    graphMetaRef.current.folderMap = folderMap;
+    const folderOpts = folderFilterOptions(folderMap);
+    let initialFolder = 'all';
+    if (folderOpts.length > 0 && (large || folderOpts.length > 1)) {
+      let best = folderOpts[0];
+      let bestN = 0;
+      const counts = new Map();
+      for (const f of folderMap.values()) {
+        if (!f) continue;
+        counts.set(f, (counts.get(f) || 0) + 1);
+      }
+      for (const f of folderOpts) {
+        const n = counts.get(f) || 0;
+        if (n > bestN) {
+          best = f;
+          bestN = n;
+        }
+      }
+      initialFolder = best;
+    }
+    setMapFolderFilter(initialFolder);
+    mapFolderFilterRef.current = initialFolder;
 
     const stacked = graphCoordsStacked(sceneGraph);
     // Browse defaults to forest arrange when coords are stacked or scene is large.
-    const shouldArrange = stacked || large;
-    const collapseTransitions = transitionLayerModeRef.current === 'collapsed';
+    const shouldArrange = stacked || large || initialFolder !== 'all';
     const presentation = computeGraphPresentation({
       sceneGraph,
       rootId: newscene.root,
@@ -768,12 +1735,15 @@ function App() {
       isDark,
       edgeMode: 'primary',
       focusNodeIds: [],
+      familyFilter: 'all',
+      folderFilter: initialFolder,
+      folderMap,
       preferCluster: false,
       rearrange: shouldArrange,
       useForestLayout: true,
       stages: newscene.stages || [],
       buildRows: false,
-      collapseTransitions,
+      collapseTransitions: true,
       existingPositions: shouldArrange
         ? null
         : new Map(
@@ -791,6 +1761,7 @@ function App() {
       hubReturnCounts: presentation.hubReturnCounts,
       clusters: presentation.clusters,
       forest: presentation.forest,
+      folderMap,
     };
     presentationCacheRef.current = {
       signature: presentation.signature,
@@ -799,26 +1770,58 @@ function App() {
       ranks: presentation.ranks,
       families: presentation.families,
       positions: presentation.positions,
+      viewGraph: presentation.folderView?.poseGraph || presentation.collapse?.poseGraph,
+      visibleIds: presentation.visibleIds,
     };
     setNavOutline(presentation.outline || []);
 
     const visibleIds = presentation.visibleIds || graphIds;
     for (const key of visibleIds) {
+      const pos = presentation.positions?.get(key) || sceneGraph[key] || { x: 40, y: 40 };
+      if (isPortalNodeId(key)) {
+        const meta = presentation.portalMeta?.get(key) || {
+          stageId: stageIdFromPortal(key),
+          folder: '?',
+          name: stageIdFromPortal(key),
+        };
+        const node = graph.addNode({
+          shape: 'stage_node',
+          id: key,
+          x: pos.x,
+          y: pos.y,
+        });
+        node.prop('isPortal', true);
+        node.prop('portalFolder', meta.folder);
+        node.prop('portalStageName', meta.name);
+        node.prop('portalStageId', meta.stageId);
+        node.prop('displayName', meta.name);
+        const size = presentation.nodeSizes?.get(key);
+        applyNodeSlots(node, {
+          inCount: size?.inCount ?? 2,
+          outCount: size?.outCount ?? 2,
+          usedIn: size?.usedIn ?? 1,
+          usedOut: size?.usedOut ?? 1,
+          isTransition: true,
+        });
+        continue;
+      }
       const stage = newscene.stages.find((s) => s.id === key);
       if (!stage) {
         console.warn('Graph references missing stage', key, newscene);
         continue;
       }
-      const pos = presentation.positions?.get(key) || sceneGraph[key] || { x: 40, y: 40 };
       const node = addStageToGraph(stage, pos.x, pos.y);
       updateNodeProps(stage, node, newscene);
       const size = presentation.nodeSizes?.get(key);
       applyNodeSlots(node, {
-        inCount: presentation.inCount?.get(key) || 1,
-        outCount: presentation.outCount?.get(key) || 1,
+        inCount: size?.inCount ?? (presentation.inCount?.get(key) || 0) + SPARE_PORT_SLOTS,
+        outCount: size?.outCount ?? (presentation.outCount?.get(key) || 0) + SPARE_PORT_SLOTS,
+        usedIn: size?.usedIn ?? (presentation.inCount?.get(key) || 0),
+        usedOut: size?.usedOut ?? (presentation.outCount?.get(key) || 0),
         isTransition: !!size?.isTransition,
       });
       node.prop('poseFamily', presentation.families?.get(key) || '');
+      node.prop('ostimFolder', folderMap.get(key) || stageOstimFolder(stage));
       node.prop(
         'hubReturns',
         presentation.hubReturnCounts?.get(key) || 0
@@ -836,13 +1839,11 @@ function App() {
       if (!nodes.find((node) => node.id === plan.target)) continue;
       graph.addEdge(planToEdgeConfig(plan));
     }
-    applyGraphLayerDim(graph, transitionLayerModeRef.current);
-    applyEdgeVisibility(graph, presentation.visibleKeys);
-    applyNodeFamilyDim(
+    applyEdgeVisibility(
       graph,
-      presentation.families,
-      mapFamilyFilterRef.current
+      initialFolder !== 'all' ? null : presentation.visibleKeys
     );
+    applyCanvasDims(graph, presentation.families);
     setEdited(false);
     // Wait until the graph container is laid out. On first project/SLAL load the
     // scene box was display:none and/or the tags panel is still mounting, so an
@@ -882,19 +1883,43 @@ function App() {
       const p = n.getPosition();
       return { id: n.id, x: p.x, y: p.y };
     });
-    const edges = graph.getEdges().map((e) => ({
-      source: e.getSourceCellId(),
-      target: e.getTargetCellId(),
-      viaStageId:
-        e.getData?.()?.viaStageId ||
-        e.prop('data')?.viaStageId ||
-        null,
-    }));
+    const folderMap =
+      graphMetaRef.current.folderMap ||
+      buildFolderMap(activeSceneRef.current.stages || []);
+    const viewIds = folderViewStageIds(
+      folderMap,
+      mapFolderFilterRef.current,
+      (activeSceneRef.current.stages || []).map((s) => s.id)
+    );
+    // Canvas still showing another folder (filter already advanced) — do not
+    // treat those cells as authority for the new view's topology.
+    if (viewIds?.length) {
+      const viewSet = new Set(viewIds);
+      const canvasReal = nodes.filter((n) => !isPortalNodeId(n.id));
+      const overlap = canvasReal.filter((n) => viewSet.has(n.id)).length;
+      if (canvasReal.length > 0 && overlap === 0) {
+        return fullGraphRef.current || activeSceneRef.current.graph || {};
+      }
+    }
+    const edges = graph
+      .getEdges()
+      .filter((e) => !e.getData?.()?.preview)
+      .map((e) => {
+        const data = e.getData?.() || e.prop('data') || {};
+        return {
+          source: e.getSourceCellId(),
+          target: e.getTargetCellId(),
+          viaStageId: data.viaStageId || null,
+          bridgeTargetId: data.bridgeTargetId || null,
+          bridgeSourceId: data.bridgeSourceId || null,
+        };
+      });
     const next = expandCanvasToStoredGraph({
       stages: activeSceneRef.current.stages || [],
       prevGraph: fullGraphRef.current || activeSceneRef.current.graph || {},
       nodes,
       edges,
+      viewStageIds: viewIds,
     });
     fullGraphRef.current = next;
     return next;
@@ -914,19 +1939,50 @@ function App() {
       return;
     }
 
+    // Visibility keys must use the pose/view graph (A→C), not stored A→T→C.
+    // Falling back to the stored graph hides via-edges on the canvas.
+    let viewGraph = cache.viewGraph;
+    if (!viewGraph) {
+      viewGraph = {};
+      graph.getEdges().forEach((edge) => {
+        if (edge.getData?.()?.preview) return;
+        const s = edge.getSourceCellId();
+        const t = edge.getTargetCellId();
+        if (!s || !t) return;
+        if (!viewGraph[s]) viewGraph[s] = { dest: [] };
+        if (!viewGraph[s].dest.includes(t)) viewGraph[s].dest.push(t);
+        if (!viewGraph[t]) viewGraph[t] = { dest: viewGraph[t]?.dest || [] };
+      });
+      for (const id of cache.visibleIds || graphIds) {
+        if (!viewGraph[id]) viewGraph[id] = { dest: [] };
+      }
+      cache.viewGraph = viewGraph;
+    }
+
+    const folderMap =
+      graphMetaRef.current.folderMap?.size
+        ? graphMetaRef.current.folderMap
+        : buildFolderMap(activeScene?.stages || []);
+    graphMetaRef.current.folderMap = folderMap;
+    const folderCanvas =
+      mapFolderFilterRef.current && mapFolderFilterRef.current !== 'all';
+    const neigh = folderCanvas ? null : currentNeighborhoodSet(viewGraph);
+
     const { visibleKeys, families } = resolveVisibleKeys({
-      sceneGraph: cache.viewGraph || sceneGraph,
-      nodeIds: cache.visibleIds || graphIds,
-      edgeMode: edgeFilterModeRef.current,
+      sceneGraph: viewGraph,
+      nodeIds: cache.visibleIds || Object.keys(viewGraph),
+      edgeMode: folderCanvas ? 'all' : edgeFilterModeRef.current,
       focusNodeIds: focusNodeIdsRef.current,
       familyFilter: mapFamilyFilterRef.current,
+      folderFilter: 'all',
+      folderMap,
+      neighborhoodSet: neigh,
       forest: cache.forest,
       ranks: cache.ranks,
     });
 
-    applyGraphLayerDim(graph, transitionLayerModeRef.current);
-    applyEdgeVisibility(graph, visibleKeys);
-    applyNodeFamilyDim(graph, families || cache.families, mapFamilyFilterRef.current);
+    applyEdgeVisibility(graph, folderCanvas ? null : visibleKeys);
+    applyCanvasDims(graph, families || cache.families);
 
     const focus = focusNodeIdsRef.current?.[0];
     if (focus && cache.forest?.parent) {
@@ -937,22 +1993,48 @@ function App() {
   /**
    * Full path: re-rank, re-route, apply changed edge plans, refresh cache.
    * Call on topology/position changes and Arrange — not on every click.
+   * @param {{ rearrange?: boolean, rootId?: string|null, existingPositions?: Map|null, skipSync?: boolean }} [opts]
+   *   skipSync: use fullGraphRef as-is (needed when the canvas still shows a
+   *   different folder than mapFolderFilterRef — e.g. mid folder-canvas switch).
    */
   const rebuildGraphPresentation = ({
     rearrange = false,
     rootId = null,
+    existingPositions: existingPositionsOverride = undefined,
+    skipSync = false,
   } = {}) => {
     if (!graph || !activeScene) return;
-    const sceneGraph = syncStoredGraphFromCanvas();
+    const sceneGraph = skipSync
+      ? fullGraphRef.current ||
+        activeSceneRef.current?.graph ||
+        activeScene.graph ||
+        {}
+      : syncStoredGraphFromCanvas();
     const graphIds = Object.keys(sceneGraph);
     if (!graphIds.length) return;
+    const liveScene = activeSceneRef.current || activeScene;
+    const liveStages = liveScene.stages || [];
     const getName = (id) =>
-      activeScene.stages?.find((s) => s.id === id)?.name || id;
+      liveStages.find((s) => s.id === id)?.name || id;
     const browse = graphWorkModeRef.current === 'browse';
     const startId =
       rootId ||
+      liveScene.root ||
       activeScene.root ||
       graphIds[0];
+    const folderMap = buildFolderMap(liveStages);
+    graphMetaRef.current.folderMap = folderMap;
+    const fromCanvas = new Map(
+      graph.getNodes().map((n) => {
+        const p = n.getPosition();
+        return [n.id, { x: p.x, y: p.y }];
+      })
+    );
+    const existingPositions = rearrange
+      ? null
+      : existingPositionsOverride !== undefined
+        ? existingPositionsOverride
+        : fromCanvas;
     const presentation = computeGraphPresentation({
       sceneGraph,
       rootId: startId,
@@ -963,21 +2045,46 @@ function App() {
         edgeFilterModeRef.current ||
         (browse ? 'primary' : 'all'),
       focusNodeIds: focusNodeIdsRef.current,
+      familyFilter: mapFamilyFilterRef.current,
+      folderFilter: mapFolderFilterRef.current,
+      folderMap,
+      neighborhoodSet: null, // filled below once view graph exists
       preferCluster: false,
       rearrange,
       useForestLayout: true,
-      stages: activeScene.stages || [],
+      stages: liveStages,
       buildRows: false,
-      collapseTransitions: transitionLayerModeRef.current === 'collapsed',
-      existingPositions: rearrange
-        ? null
-        : new Map(
-            graph.getNodes().map((n) => {
-              const p = n.getPosition();
-              return [n.id, { x: p.x, y: p.y }];
-            })
-          ),
+      collapseTransitions: true,
+      existingPositions,
     });
+    const viewForNeigh =
+      presentation.folderView?.poseGraph ||
+      presentation.collapse?.poseGraph ||
+      sceneGraph;
+    const folderCanvas =
+      mapFolderFilterRef.current && mapFolderFilterRef.current !== 'all';
+    // Folder canvases are already a small subset — do not hide edges via
+    // neighborhood / primary filters (that left edges "stuck" hidden on switch).
+    const neigh = folderCanvas ? null : currentNeighborhoodSet(viewForNeigh);
+    if (neigh) {
+      const { visibleKeys: filteredKeys } = resolveVisibleKeys({
+        sceneGraph: viewForNeigh,
+        nodeIds: presentation.visibleIds,
+        edgeMode:
+          edgeFilterModeRef.current ||
+          (browse ? 'primary' : 'all'),
+        focusNodeIds: focusNodeIdsRef.current,
+        familyFilter: mapFamilyFilterRef.current,
+        folderFilter: 'all',
+        folderMap,
+        neighborhoodSet: neigh,
+        forest: presentation.forest,
+        ranks: presentation.ranks,
+      });
+      presentation.visibleKeys = filteredKeys;
+    } else if (folderCanvas) {
+      presentation.visibleKeys = null;
+    }
 
     const wantIds = new Set(presentation.visibleIds || []);
     const hadIds = new Set(graph.getNodes().map((n) => n.id));
@@ -990,14 +2097,45 @@ function App() {
       });
       suppressingNodeRemoveRef.current = false;
       for (const id of wantIds) {
-        const stage = activeScene.stages?.find((s) => s.id === id);
-        if (!stage) continue;
         let node = graph.getCellById(id);
         const pos = presentation.positions?.get(id) || {
           x: sceneGraph[id]?.x || 40,
           y: sceneGraph[id]?.y || 40,
         };
         const newlyRevealed = !hadIds.has(id);
+        if (isPortalNodeId(id)) {
+          const meta = presentation.portalMeta?.get(id) || {
+            stageId: stageIdFromPortal(id),
+            folder: '?',
+            name: stageIdFromPortal(id),
+          };
+          if (!node) {
+            node = graph.addNode({
+              shape: 'stage_node',
+              id,
+              x: pos.x,
+              y: pos.y,
+            });
+          } else if (rearrange || newlyRevealed) {
+            node.setPosition(pos.x, pos.y);
+          }
+          node.prop('isPortal', true);
+          node.prop('portalFolder', meta.folder);
+          node.prop('portalStageName', meta.name);
+          node.prop('portalStageId', meta.stageId);
+          node.prop('displayName', meta.name);
+          const size = presentation.nodeSizes?.get(id);
+          applyNodeSlots(node, {
+            inCount: size?.inCount ?? 2,
+            outCount: size?.outCount ?? 2,
+            usedIn: size?.usedIn ?? 1,
+            usedOut: size?.usedOut ?? 1,
+            isTransition: true,
+          });
+          continue;
+        }
+        const stage = liveStages.find((s) => s.id === id);
+        if (!stage) continue;
         const isT = !!presentation.nodeSizes?.get(id)?.isTransition;
         const curPos = node?.getPosition?.();
         const parkedAtOrigin =
@@ -1010,19 +2148,21 @@ function App() {
           // Newly revealed / origin-parked transition stages must leave the default corner.
           node.setPosition(pos.x, pos.y);
         }
-        updateNodeProps(stage, node, activeScene);
+        updateNodeProps(stage, node, liveScene);
         const size = presentation.nodeSizes?.get(id);
         applyNodeSlots(node, {
-          inCount: presentation.inCount?.get(id) || 1,
-          outCount: presentation.outCount?.get(id) || 1,
+          inCount: size?.inCount ?? (presentation.inCount?.get(id) || 0) + SPARE_PORT_SLOTS,
+          outCount: size?.outCount ?? (presentation.outCount?.get(id) || 0) + SPARE_PORT_SLOTS,
+          usedIn: size?.usedIn ?? (presentation.inCount?.get(id) || 0),
+          usedOut: size?.usedOut ?? (presentation.outCount?.get(id) || 0),
           isTransition: !!size?.isTransition,
         });
         node.prop('poseFamily', presentation.families?.get(id) || '');
+        node.prop('ostimFolder', folderMap.get(id) || stageOstimFolder(stage));
         node.prop(
           'hubReturns',
           presentation.hubReturnCounts?.get(id) || 0
         );
-        if (newlyRevealed) node.setProp('layerDim', false, { silent: true });
       }
 
       const planByPair = new Map(
@@ -1054,6 +2194,7 @@ function App() {
       hubReturnCounts: presentation.hubReturnCounts,
       clusters: presentation.clusters,
       forest: presentation.forest,
+      folderMap,
     };
     presentationCacheRef.current = {
       signature: presentation.signature,
@@ -1062,18 +2203,18 @@ function App() {
       ranks: presentation.ranks,
       families: presentation.families,
       positions: presentation.positions,
-      viewGraph: presentation.collapse?.poseGraph,
+      viewGraph: viewForNeigh,
       visibleIds: presentation.visibleIds,
     };
     setNavOutline(presentation.outline || []);
 
-    applyGraphLayerDim(graph, transitionLayerModeRef.current);
-    applyEdgeVisibility(graph, presentation.visibleKeys);
-    applyNodeFamilyDim(
+    applyEdgeVisibility(
       graph,
-      presentation.families,
-      mapFamilyFilterRef.current
+      mapFolderFilterRef.current && mapFolderFilterRef.current !== 'all'
+        ? null
+        : presentation.visibleKeys
     );
+    applyCanvasDims(graph, presentation.families);
 
     const focus = focusNodeIdsRef.current?.[0];
     if (focus && presentation.forest?.parent) {
@@ -1082,8 +2223,223 @@ function App() {
   };
 
   refreshGraphEdgesRef.current = refreshGraphEdgeVisibility;
-  rebuildGraphPresentationRef.current = () =>
-    rebuildGraphPresentation({ rearrange: false });
+  rebuildGraphPresentationRef.current = (opts = {}) =>
+    rebuildGraphPresentation({ rearrange: false, ...opts });
+
+  const cacheFolderLayout = (sceneId, folder) => {
+    if (!graph || !sceneId) return;
+    const key = `${sceneId}\0${folder || 'all'}`;
+    const map = new Map();
+    graph.getNodes().forEach((n) => {
+      if (isPortalNodeId(n.id)) return;
+      const p = n.getPosition();
+      map.set(n.id, { x: p.x, y: p.y });
+    });
+    folderLayoutCacheRef.current.set(key, map);
+  };
+
+  const switchFolderView = (nextFolder, { focusStageId = null } = {}) => {
+    if (!graph || !activeSceneRef.current) return;
+    const sceneId = activeSceneRef.current.id;
+    const prev = mapFolderFilterRef.current;
+    // Commit the *current* canvas into the full graph, then remount without
+    // syncing again (canvas still has the old folder until rebuild finishes).
+    syncStoredGraphFromCanvas();
+    cacheFolderLayout(sceneId, prev);
+    setMapFolderFilter(nextFolder);
+    mapFolderFilterRef.current = nextFolder;
+    // Folder subsets are small — show every mounted edge after switch.
+    setEdgeFilterMode('all');
+    edgeFilterModeRef.current = 'all';
+    setFocusNodeIds(focusStageId ? [focusStageId] : []);
+    focusNodeIdsRef.current = focusStageId ? [focusStageId] : [];
+    const cacheKey = `${sceneId}\0${nextFolder || 'all'}`;
+    const cached = folderLayoutCacheRef.current.get(cacheKey);
+    presentationCacheRef.current = null;
+    rebuildGraphPresentation({
+      rearrange: !cached,
+      existingPositions: cached || undefined,
+      skipSync: true,
+    });
+    queueMicrotask(() => {
+      try {
+        if (nextFolder && nextFolder !== 'all') {
+          applyEdgeVisibility(graph, null);
+        }
+        if (focusStageId) {
+          const cell = graph.getCellById(focusStageId);
+          if (cell) {
+            graph.centerCell(cell);
+            graph.select(cell);
+            return;
+          }
+        }
+        graph.zoomToFit({ padding: 32, maxScale: 1, minScale: 0.45 });
+        graph.centerContent();
+      } catch (_) { /* ignore */ }
+    });
+  };
+
+  const jumpToPortal = (node) => {
+    if (!node) return;
+    const stageId =
+      node.prop('portalStageId') ||
+      stageIdFromPortal(node.id);
+    const folder =
+      node.prop('portalFolder') ||
+      graphMetaRef.current.folderMap?.get(stageId) ||
+      'all';
+    if (!folder || folder === '(other)') {
+      switchFolderView('all', { focusStageId: stageId });
+      return;
+    }
+    switchFolderView(folder, { focusStageId: stageId });
+  };
+  jumpToPortalRef.current = jumpToPortal;
+
+  const promptNewPackFolder = () => {
+    let draft = '';
+    Modal.confirm({
+      title: 'New OStim pack folder',
+      content: (
+        <Input
+          placeholder="e.g. Back, Lay, Standing"
+          autoFocus
+          onChange={(e) => {
+            draft = e.target.value;
+          }}
+          onPressEnter={(e) => {
+            draft = e.target.value;
+          }}
+        />
+      ),
+      okText: 'Create & open',
+      onOk: () => {
+        const name = String(draft || '')
+          .trim()
+          .replace(/[\\/]/g, '_');
+        if (!name) return Promise.reject();
+        setExtraFolders((prev) =>
+          prev.includes(name) ? prev : [...prev, name]
+        );
+        switchFolderView(name);
+      },
+    });
+  };
+
+  const assignStagesToFolder = (stageIds, folder) => {
+    const ids = new Set((stageIds || []).filter(Boolean));
+    const f = String(folder || '').trim();
+    if (!ids.size || !f || f === 'all') return;
+    updateActiveScene((prev) => {
+      for (const stage of prev.stages || []) {
+        if (!ids.has(stage.id)) continue;
+        stage.tags = tagsWithOstimFolder(stage.tags || [], f);
+      }
+      graphMetaRef.current.folderMap = buildFolderMap(prev.stages || []);
+    });
+    setEdited(true);
+    setExtraFolders((prev) => (prev.includes(f) ? prev : [...prev, f]));
+    queueMicrotask(() => {
+      for (const id of ids) {
+        const n = graph?.getCellById(id);
+        if (n) n.prop('ostimFolder', f);
+      }
+      // Stay on / open that folder canvas so the stage remains visible.
+      if (mapFolderFilterRef.current !== f) {
+        switchFolderView(f, { focusStageId: [...ids][0] });
+      } else {
+        rebuildGraphPresentationRef.current?.();
+      }
+    });
+  };
+
+  const promptMoveStageToFolder = (stageId) => {
+    let draft =
+      mapFolderFilterRef.current !== 'all'
+        ? mapFolderFilterRef.current
+        : '';
+    Modal.confirm({
+      title: 'Move stage to pack folder',
+      content: (
+        <Input
+          list="slsb-ostim-folders"
+          placeholder="e.g. Back, Lay, Standing"
+          defaultValue={draft}
+          autoFocus
+          onChange={(e) => {
+            draft = e.target.value;
+          }}
+          onPressEnter={(e) => {
+            draft = e.target.value;
+          }}
+        />
+      ),
+      okText: 'Assign',
+      onOk: () => {
+        const name = String(draft || '')
+          .trim()
+          .replace(/[\\/]/g, '_');
+        if (!name) return Promise.reject();
+        assignStagesToFolder([stageId], name);
+      },
+    });
+  };
+
+  /** Instant port refresh + deferred routing so new links don't hitch. */
+  const scheduleTopologyRebuild = (nodeIds = []) => {
+    if (!graph) return;
+    syncStoredGraphFromCanvas();
+    const usedIn = new Map();
+    const usedOut = new Map();
+    graph.getNodes().forEach((n) => {
+      usedIn.set(n.id, 0);
+      usedOut.set(n.id, 0);
+    });
+    graph.getEdges().forEach((e) => {
+      if (e.getData?.()?.preview) return;
+      const s = e.getSourceCellId();
+      const t = e.getTargetCellId();
+      if (s) usedOut.set(s, (usedOut.get(s) || 0) + 1);
+      if (t) usedIn.set(t, (usedIn.get(t) || 0) + 1);
+    });
+    const ids = (nodeIds || []).filter(Boolean);
+    const touch = ids.length ? ids : [...usedIn.keys()];
+    for (const id of touch) {
+      const node = graph.getCellById(id);
+      if (!node) continue;
+      const ui = usedIn.get(id) || 0;
+      const uo = usedOut.get(id) || 0;
+      applyNodeSlots(node, {
+        inCount: ui + SPARE_PORT_SLOTS,
+        outCount: uo + SPARE_PORT_SLOTS,
+        usedIn: ui,
+        usedOut: uo,
+        isTransition: !!node.prop('isTransition'),
+      });
+    }
+    const focus = new Set(ids);
+    graph.getEdges().forEach((edge) => {
+      if (edge.getData?.()?.preview) {
+        if (typeof edge.setVisible === 'function') edge.setVisible(true);
+        return;
+      }
+      const s = edge.getSourceCellId();
+      const t = edge.getTargetCellId();
+      if (!focus.size || focus.has(s) || focus.has(t)) {
+        if (typeof edge.setVisible === 'function') edge.setVisible(true);
+        else edge.setProp('visible', true);
+      }
+    });
+    if (rebuildTimerRef.current) clearTimeout(rebuildTimerRef.current);
+    rebuildTimerRef.current = setTimeout(() => {
+      rebuildTimerRef.current = null;
+      presentationCacheRef.current = null;
+      rebuildGraphPresentation({ rearrange: false });
+    }, 48);
+  };
+  scheduleTopologyRebuildRef.current = scheduleTopologyRebuild;
+  syncStoredGraphFromCanvasRef.current = syncStoredGraphFromCanvas;
 
   const arrangeStages = (rootId = activeScene?.root, markEdited = true) => {
     if (!graph?.getNodes()?.length) return;
@@ -1121,32 +2477,43 @@ function App() {
 
   const jumpToNode = (nodeId) => {
     if (!nodeId || !graph) return;
+    const folderMap =
+      graphMetaRef.current.folderMap ||
+      buildFolderMap(activeSceneRef.current?.stages || []);
+    const stageFolder = folderMap.get(nodeId) || '';
+    const current = mapFolderFilterRef.current;
+    if (
+      current &&
+      current !== 'all' &&
+      stageFolder &&
+      stageFolder !== current
+    ) {
+      switchFolderView(stageFolder, { focusStageId: nodeId });
+      return;
+    }
     setFocusNodeIds([nodeId]);
     focusNodeIdsRef.current = [nodeId];
     const forest = graphMetaRef.current.forest;
     if (forest?.parent) {
       setPathIds(pathToNode(nodeId, forest.parent));
     }
-    if (graphWorkModeRef.current === 'browse') {
-      setEdgeFilterMode('primary');
-      edgeFilterModeRef.current = 'primary';
-    } else {
-      setEdgeFilterMode('neighborhood');
-      edgeFilterModeRef.current = 'neighborhood';
+    setEdgeFilterMode('neighborhood');
+    edgeFilterModeRef.current = 'neighborhood';
+    // Keep finite hops so focus dims the rest of a large graph.
+    if (!Number.isFinite(focusHopsRef.current) || focusHopsRef.current < 0) {
+      setFocusHops(2);
+      focusHopsRef.current = 2;
     }
     queueMicrotask(() => {
       refreshGraphEdgesRef.current?.();
-      requestAnimationFrame(() => {
+      const cell = graph.getCellById(nodeId);
+      if (cell) {
         try {
-          graph.resize();
-          const cell = graph.getCellById(nodeId);
-          if (cell) {
-            graph.centerCell(cell);
-            graph.zoomTo(0.9, { maxScale: 1.2, minScale: 0.4 });
-            graph.select(cell);
-          }
+          graph.centerCell(cell);
+          graph.zoomTo(0.9, { maxScale: 1.2, minScale: 0.4 });
+          graph.select(cell);
         } catch (_) { /* ignore */ }
-      });
+      }
     });
   };
 
@@ -1341,7 +2708,61 @@ function App() {
       x: posX,
       y: posY,
     });
+    // Empty stages have no edges yet — still need visible free ports immediately.
+    applyNodeSlots(node, {
+      inCount: SPARE_PORT_SLOTS,
+      outCount: SPARE_PORT_SLOTS,
+      usedIn: 0,
+      usedOut: 0,
+      isTransition: isTransitionStage(stage),
+    });
     return node;
+  };
+
+  /** Open stage editor for a new stage; optional canvas drop + port link. */
+  const openNewStageEditor = ({
+    graphX = null,
+    graphY = null,
+    connectFrom = null,
+  } = {}) => {
+    const scene = activeSceneRef.current;
+    if (!scene) return;
+    const stages = scene.stages || [];
+    const folder = mapFolderFilterRef.current;
+    const last = stages.length > 0 ? stages[stages.length - 1] : null;
+    let templateStage = last;
+    if (folder && folder !== 'all') {
+      templateStage = {
+        id: last?.id || '',
+        name: last?.name || '',
+        positions: last?.positions || [],
+        tags: tagsWithOstimFolder([], folder),
+        extra: last?.extra || {},
+      };
+    }
+    if (Number.isFinite(graphX) && Number.isFinite(graphY)) {
+      pendingStageDropRef.current = {
+        x: graphX,
+        y: graphY,
+        connectFrom: connectFrom || null,
+      };
+    } else if (connectFrom) {
+      pendingStageDropRef.current = {
+        x: undefined,
+        y: undefined,
+        connectFrom,
+      };
+    } else {
+      pendingStageDropRef.current = null;
+    }
+    stashNavForStage(scene, null);
+    invoke('open_stage_editor', {
+      sceneId: scene.id,
+      positions: scene.positions || [],
+      stage: null,
+      existingStageCount: stages.length,
+      templateStage,
+    });
   };
 
   const updateNodeProps = (stage, node, belongingScene) => {
@@ -1580,6 +3001,7 @@ function App() {
       cloneToSourceScene,
       target
     );
+    stashNavForStage(targetWithActors, null);
     invoke('open_stage_editor_from', {
       sceneId: targetWithActors.id,
       positions: targetWithActors.positions || [],
@@ -1603,6 +3025,34 @@ function App() {
           {/* Left Panel */}
           <Panel minSize={10} defaultSize={15} maxSize={50} id="left-panel">
             {contextHolder}
+            <JobProgressModal
+              open={!!jobProgress}
+              title={jobProgress?.title}
+              message={jobProgress?.message}
+              current={jobProgress?.current}
+              total={jobProgress?.total}
+              error={jobProgress?.error}
+            />
+            <AssetLibraryModal
+              open={assetLibraryOpen}
+              onClose={() => setAssetLibraryOpen(false)}
+              projectLibrary={assetLibrary}
+              onReplaceProject={(next) => {
+                invoke('replace_asset_library', { library: next })
+                  .then((merged) => {
+                    const lib = normalizeAssetLibrary(merged);
+                    setAssetLibrary(lib);
+                  })
+                  .catch((err) => {
+                    console.error(err);
+                    api.error({
+                      message: 'Failed to update asset library',
+                      description: String(err),
+                      placement: 'bottomLeft',
+                    });
+                  });
+              }}
+            />
             <Modal
               title="Clone stage to animation"
               open={cloneToOpen}
@@ -1766,19 +3216,7 @@ function App() {
                             extra={
                               <Space.Compact block>
                                 <Button
-                                  onClick={() => {
-                                    const stages = activeScene.stages || [];
-                                    invoke('open_stage_editor', {
-                                      sceneId: activeScene.id,
-                                      positions: activeScene.positions || [],
-                                      stage: null,
-                                      existingStageCount: stages.length,
-                                      templateStage:
-                                        stages.length > 0
-                                          ? stages[stages.length - 1]
-                                          : null,
-                                    });
-                                  }}
+                                  onClick={() => openNewStageEditor()}
                                 >
                                   Add Stage
                                 </Button>
@@ -1792,8 +3230,9 @@ function App() {
                             <div className="graph-toolbox">
                               <Space
                                 className="graph-toolbox-content"
-                                size={'small'}
+                                size="small"
                                 align="center"
+                                wrap
                               >
                                 <Tooltip title="Undo" mouseEnterDelay={0.5}>
                                   <Button
@@ -1862,56 +3301,6 @@ function App() {
                                   />
                                 </Tooltip>
                                 <Divider type="vertical" />
-                                <Tooltip
-                                  title="Collapsed: via-edge labels. Poses/Transitions: full graph with inactive layer dimmed."
-                                  mouseEnterDelay={0.5}
-                                >
-                                  <Segmented
-                                    size="small"
-                                    value={transitionLayerMode}
-                                    onChange={(v) => {
-                                      const prev = transitionLayerModeRef.current;
-                                      setTransitionLayerMode(v);
-                                      transitionLayerModeRef.current = v;
-                                      const wasCollapsed = prev === 'collapsed';
-                                      const nowCollapsed = v === 'collapsed';
-                                      if (wasCollapsed !== nowCollapsed) {
-                                        presentationCacheRef.current = null;
-                                        if (!nowCollapsed) {
-                                          updateActiveScene((draft) => {
-                                            if (
-                                              disambiguateDuplicateStageNames(
-                                                draft.stages || []
-                                              )
-                                            ) {
-                                              setEdited(true);
-                                            }
-                                          });
-                                        }
-                                        setTimeout(() => {
-                                          rebuildGraphPresentation({
-                                            rearrange: false,
-                                          });
-                                        }, 0);
-                                      } else {
-                                        queueMicrotask(() => {
-                                          applyGraphLayerDim(graph, v);
-                                          applyNodeFamilyDim(
-                                            graph,
-                                            presentationCacheRef.current?.families,
-                                            mapFamilyFilterRef.current
-                                          );
-                                        });
-                                      }
-                                    }}
-                                    options={[
-                                      { value: 'collapsed', label: 'Collapsed' },
-                                      { value: 'poses', label: 'Poses' },
-                                      { value: 'transitions', label: 'Transitions' },
-                                    ]}
-                                  />
-                                </Tooltip>
-                                <Divider type="vertical" />
                                 <Segmented
                                   size="small"
                                   value={graphWorkMode}
@@ -1921,39 +3310,128 @@ function App() {
                                     { value: 'edit', label: 'Edit' },
                                   ]}
                                 />
-                                <Select
-                                  size="small"
-                                  value={edgeFilterMode}
-                                  style={{ width: 140 }}
-                                  onChange={(v) => {
-                                    setEdgeFilterMode(v);
-                                    edgeFilterModeRef.current = v;
-                                    queueMicrotask(() => refreshGraphEdgesRef.current?.());
-                                  }}
-                                  options={[
-                                    { value: 'primary', label: 'Edges: Primary' },
-                                    { value: 'neighborhood', label: 'Edges: Near' },
-                                    { value: 'family', label: 'Edges: Family' },
-                                    { value: 'all', label: 'Edges: All' },
-                                  ]}
-                                />
-                                <Select
-                                  size="small"
-                                  value={mapFamilyFilter}
-                                  style={{ width: 160 }}
-                                  onChange={(v) => {
-                                    setMapFamilyFilter(v);
-                                    mapFamilyFilterRef.current = v;
-                                    queueMicrotask(() => refreshGraphEdgesRef.current?.());
-                                  }}
-                                  options={[
-                                    { value: 'all', label: 'All families' },
-                                    ...familyFilterOptions.map((f) => ({
-                                      value: f,
-                                      label: f,
-                                    })),
-                                  ]}
-                                />
+                                {ostimFolderOptions.length > 0 && (
+                                  <Select
+                                    size="small"
+                                    value={mapFolderFilter}
+                                    style={{ width: 130 }}
+                                    popupMatchSelectWidth={false}
+                                    title="Virtual canvas = OStim scenes/{folder}/"
+                                    onChange={(v) => switchFolderView(v)}
+                                    options={[
+                                      {
+                                        value: 'all',
+                                        label: 'All folders',
+                                        title: 'Full component (can be slow)',
+                                      },
+                                      ...ostimFolderOptions,
+                                    ]}
+                                  />
+                                )}
+                                <Dropdown
+                                  trigger={['click']}
+                                  dropdownRender={() => (
+                                    <div className="graph-view-filters">
+                                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                        Edge & map filters
+                                      </Typography.Text>
+                                      <Select
+                                        size="small"
+                                        value={edgeFilterMode}
+                                        onChange={(v) => {
+                                          setEdgeFilterMode(v);
+                                          edgeFilterModeRef.current = v;
+                                          queueMicrotask(() =>
+                                            refreshGraphEdgesRef.current?.()
+                                          );
+                                        }}
+                                        options={[
+                                          { value: 'primary', label: 'Edges: Primary' },
+                                          { value: 'neighborhood', label: 'Edges: Near' },
+                                          { value: 'family', label: 'Edges: Family' },
+                                          { value: 'all', label: 'Edges: All' },
+                                        ]}
+                                      />
+                                      <Select
+                                        size="small"
+                                        value={mapFamilyFilter}
+                                        onChange={(v) => {
+                                          setMapFamilyFilter(v);
+                                          mapFamilyFilterRef.current = v;
+                                          queueMicrotask(() =>
+                                            refreshGraphEdgesRef.current?.()
+                                          );
+                                        }}
+                                        options={[
+                                          { value: 'all', label: 'All families' },
+                                          ...familyFilterOptions.map((f) => ({
+                                            value: f,
+                                            label: f,
+                                          })),
+                                        ]}
+                                      />
+                                      {(mapFolderFilter === 'all' ||
+                                        !ostimFolderOptions.length) && (
+                                        <>
+                                          <Typography.Text
+                                            type="secondary"
+                                            style={{ fontSize: 12 }}
+                                          >
+                                            Focus hops (All-folders canvas)
+                                          </Typography.Text>
+                                          <Select
+                                            size="small"
+                                            value={
+                                              Number.isFinite(focusHops)
+                                                ? focusHops
+                                                : 'all'
+                                            }
+                                            onChange={(v) => {
+                                              const hops =
+                                                v === 'all' ? Infinity : Number(v);
+                                              setFocusHops(hops);
+                                              focusHopsRef.current = hops;
+                                              queueMicrotask(() =>
+                                                refreshGraphEdgesRef.current?.()
+                                              );
+                                            }}
+                                            options={[
+                                              { value: 1, label: '1 hop' },
+                                              { value: 2, label: '2 hops' },
+                                              { value: 3, label: '3 hops' },
+                                              { value: 'all', label: 'Off' },
+                                            ]}
+                                          />
+                                        </>
+                                      )}
+                                      {focusNodeIds.length > 0 && (
+                                        <Button
+                                          size="small"
+                                          onClick={() => {
+                                            setFocusNodeIds([]);
+                                            focusNodeIdsRef.current = [];
+                                            setPathIds([]);
+                                            queueMicrotask(() =>
+                                              refreshGraphEdgesRef.current?.()
+                                            );
+                                          }}
+                                        >
+                                          Clear focus
+                                        </Button>
+                                      )}
+                                    </div>
+                                  )}
+                                >
+                                  <Tooltip title="Edge / family / focus filters">
+                                    <Button
+                                      type="text"
+                                      size="small"
+                                      icon={<FilterOutlined />}
+                                    >
+                                      Filters
+                                    </Button>
+                                  </Tooltip>
+                                </Dropdown>
                                 <GraphNodeSearch
                                   stages={activeScene?.stages || []}
                                   onJump={jumpToNode}
@@ -2054,9 +3532,34 @@ function App() {
                                 </Tooltip>
                               </Space>
                             </div>
+                            {showLargeSceneTip && (
+                              <Alert
+                                type="info"
+                                showIcon
+                                closable
+                                banner
+                                style={{ margin: '0 0 4px' }}
+                                message={
+                                  showFolderTip
+                                    ? `Viewing pack folder “${mapFolderFilter}”. Right-click stages/canvas for folder actions. Teal edges → other folders.`
+                                    : `Large OStim component (${activeScene.stages.length} stages). Pick a Canvas folder, or right-click the canvas → Open canvas.`
+                                }
+                              />
+                            )}
+                            {!showLargeSceneTip && showFolderTip && (
+                              <Alert
+                                type="info"
+                                showIcon
+                                closable
+                                banner
+                                style={{ margin: '0 0 4px' }}
+                                message={`Pack folder “${mapFolderFilter}”. Right-click a stage to move folders; right-click empty canvas for Add stage / New folder.`}
+                              />
+                            )}
                             <div
                               className="graph-container"
                               style={{
+                                position: 'relative',
                                 display: 'flex',
                                 flexDirection: 'row',
                                 height: '100%',
@@ -2104,6 +3607,359 @@ function App() {
                                   height: '100%',
                                 }}
                               />
+                              {connectHint && (
+                                <div className="graph-connect-hint" role="status">
+                                  {connectHint}
+                                </div>
+                              )}
+                              {graphCtxMenu && (
+                                <div
+                                  className="graph-ctx-menu"
+                                  style={{
+                                    left: graphCtxMenu.x,
+                                    top: graphCtxMenu.y,
+                                  }}
+                                  onClick={(e) => e.stopPropagation()}
+                                  onContextMenu={(e) => e.preventDefault()}
+                                >
+                                  <Menu
+                                    selectable={false}
+                                    items={(
+                                      graphCtxMenu.kind === 'blank'
+                                        ? [
+                                            {
+                                              key: 'add-stage',
+                                              label: 'Add stage here…',
+                                              onClick: () => {
+                                                const { graphX, graphY } =
+                                                  graphCtxMenu;
+                                                setGraphCtxMenu(null);
+                                                openNewStageEditor({
+                                                  graphX,
+                                                  graphY,
+                                                });
+                                              },
+                                            },
+                                            {
+                                              key: 'new-folder',
+                                              label: 'New pack folder…',
+                                              onClick: () => {
+                                                setGraphCtxMenu(null);
+                                                promptNewPackFolder();
+                                              },
+                                            },
+                                            ostimFolderOptions.length
+                                              ? {
+                                                  key: 'open-folder',
+                                                  label: 'Open canvas',
+                                                  children: [
+                                                    {
+                                                      key: 'all',
+                                                      label: 'All (slow)',
+                                                      onClick: () => {
+                                                        setGraphCtxMenu(null);
+                                                        switchFolderView('all');
+                                                      },
+                                                    },
+                                                    ...ostimFolderOptions.map(
+                                                      (o) => ({
+                                                        key: o.value,
+                                                        label: o.label.replace(
+                                                          /^Canvas:\s*/,
+                                                          ''
+                                                        ),
+                                                        onClick: () => {
+                                                          setGraphCtxMenu(null);
+                                                          switchFolderView(
+                                                            o.value
+                                                          );
+                                                        },
+                                                      })
+                                                    ),
+                                                  ],
+                                                }
+                                              : null,
+                                            {
+                                              key: 'edges-all',
+                                              label: 'Show all edges',
+                                              onClick: () => {
+                                                setGraphCtxMenu(null);
+                                                setEdgeFilterMode('all');
+                                                edgeFilterModeRef.current =
+                                                  'all';
+                                                applyEdgeVisibility(graph, null);
+                                                queueMicrotask(() =>
+                                                  refreshGraphEdgesRef.current?.()
+                                                );
+                                              },
+                                            },
+                                          ]
+                                        : graphCtxMenu.kind === 'connect-drop'
+                                          ? [
+                                              {
+                                                key: 'create-here',
+                                                label: 'Create stage here',
+                                                onClick: () => {
+                                                  const intent =
+                                                    connectDropIntentRef.current ||
+                                                    {
+                                                      graphX: graphCtxMenu.graphX,
+                                                      graphY: graphCtxMenu.graphY,
+                                                      connectFrom:
+                                                        graphCtxMenu.connectFrom,
+                                                    };
+                                                  connectDropIntentRef.current =
+                                                    null;
+                                                  setGraphCtxMenu(null);
+                                                  // Keep blank clicks from eating the drop intent.
+                                                  ignoreBlankClickUntilRef.current =
+                                                    Date.now() + 800;
+                                                  clearConnectPendingRef.current?.(
+                                                    { restore: false }
+                                                  );
+                                                  openNewStageEditor({
+                                                    graphX: intent.graphX,
+                                                    graphY: intent.graphY,
+                                                    connectFrom:
+                                                      intent.connectFrom,
+                                                  });
+                                                },
+                                              },
+                                              {
+                                                key: 'cancel-link',
+                                                label: 'Cancel',
+                                                onClick: () => {
+                                                  connectDropIntentRef.current =
+                                                    null;
+                                                  setGraphCtxMenu(null);
+                                                  clearConnectPendingRef.current?.(
+                                                    { restore: true }
+                                                  );
+                                                },
+                                              },
+                                            ]
+                                        : graphCtxMenu.kind === 'portal'
+                                          ? [
+                                              {
+                                                key: 'open',
+                                                label: `Open ${graphCtxMenu.portalFolder || 'folder'}…`,
+                                                onClick: () => {
+                                                  const id =
+                                                    graphCtxMenu.nodeId;
+                                                  setGraphCtxMenu(null);
+                                                  const cell =
+                                                    graph.getCellById(id);
+                                                  if (cell)
+                                                    jumpToPortal(cell);
+                                                },
+                                              },
+                                            ]
+                                          : graphCtxMenu.kind === 'node'
+                                            ? [
+                                                {
+                                                  key: 'edit',
+                                                  label: 'Edit stage…',
+                                                  onClick: () => {
+                                                    const id =
+                                                      graphCtxMenu.nodeId;
+                                                    setGraphCtxMenu(null);
+                                                    const cell =
+                                                      graph.getCellById(id);
+                                                    if (cell)
+                                                      graph.emit('node:edit', {
+                                                        node: cell,
+                                                      });
+                                                  },
+                                                },
+                                                {
+                                                  key: 'clone',
+                                                  label: 'Clone',
+                                                  onClick: () => {
+                                                    const id =
+                                                      graphCtxMenu.nodeId;
+                                                    setGraphCtxMenu(null);
+                                                    const cell =
+                                                      graph.getCellById(id);
+                                                    if (cell)
+                                                      graph.emit(
+                                                        'node:clone',
+                                                        { node: cell }
+                                                      );
+                                                  },
+                                                },
+                                                {
+                                                  key: 'root',
+                                                  label: 'Mark as root',
+                                                  onClick: () => {
+                                                    const id =
+                                                      graphCtxMenu.nodeId;
+                                                    setGraphCtxMenu(null);
+                                                    const cell =
+                                                      graph.getCellById(id);
+                                                    if (cell)
+                                                      graph.emit(
+                                                        'node:doMarkRoot',
+                                                        { node: cell }
+                                                      );
+                                                  },
+                                                },
+                                                { type: 'divider' },
+                                                {
+                                                  key: 'move-folder',
+                                                  label: 'Move to pack folder…',
+                                                  onClick: () => {
+                                                    const id =
+                                                      graphCtxMenu.nodeId;
+                                                    setGraphCtxMenu(null);
+                                                    promptMoveStageToFolder(id);
+                                                  },
+                                                },
+                                                mapFolderFilter !== 'all'
+                                                  ? {
+                                                      key: 'assign-here',
+                                                      label: `Assign to “${mapFolderFilter}”`,
+                                                      onClick: () => {
+                                                        const id =
+                                                          graphCtxMenu.nodeId;
+                                                        setGraphCtxMenu(null);
+                                                        assignStagesToFolder(
+                                                          [id],
+                                                          mapFolderFilter
+                                                        );
+                                                      },
+                                                    }
+                                                  : null,
+                                                graphCtxMenu.ostimFolder
+                                                  ? {
+                                                      key: 'open-own',
+                                                      label: `Open canvas “${graphCtxMenu.ostimFolder}”`,
+                                                      onClick: () => {
+                                                        const id =
+                                                          graphCtxMenu.nodeId;
+                                                        const folder =
+                                                          graphCtxMenu.ostimFolder;
+                                                        setGraphCtxMenu(null);
+                                                        switchFolderView(
+                                                          folder,
+                                                          {
+                                                            focusStageId: id,
+                                                          }
+                                                        );
+                                                      },
+                                                    }
+                                                  : null,
+                                                ostimFolderOptions.length
+                                                  ? {
+                                                      key: 'goto-folder',
+                                                      label: 'Open canvas',
+                                                      children:
+                                                        ostimFolderOptions.map(
+                                                          (o) => ({
+                                                            key: o.value,
+                                                            label: o.label.replace(
+                                                              /^Canvas:\s*/,
+                                                              ''
+                                                            ),
+                                                            onClick: () => {
+                                                              setGraphCtxMenu(
+                                                                null
+                                                              );
+                                                              switchFolderView(
+                                                                o.value
+                                                              );
+                                                            },
+                                                          })
+                                                        ),
+                                                    }
+                                                  : null,
+                                                {
+                                                  key: 'new-folder',
+                                                  label: 'New pack folder…',
+                                                  onClick: () => {
+                                                    setGraphCtxMenu(null);
+                                                    promptNewPackFolder();
+                                                  },
+                                                },
+                                                { type: 'divider' },
+                                                {
+                                                  key: 'delete',
+                                                  label: 'Delete',
+                                                  danger: true,
+                                                  onClick: () => {
+                                                    const id =
+                                                      graphCtxMenu.nodeId;
+                                                    setGraphCtxMenu(null);
+                                                    const cell =
+                                                      graph.getCellById(id);
+                                                    if (cell) cell.remove();
+                                                  },
+                                                },
+                                              ]
+                                            : [
+                                                // edge (default)
+                                                graphCtxMenu.bridgeFolder ||
+                                                graphCtxMenu.bridgeTargetId
+                                                  ? {
+                                                      key: 'open-bridge',
+                                                      label: graphCtxMenu.bridgeFolder
+                                                        ? `Open “${graphCtxMenu.bridgeFolder}”…`
+                                                        : 'Open linked folder…',
+                                                      onClick: () => {
+                                                        const stageId =
+                                                          graphCtxMenu.bridgeTargetId ||
+                                                          graphCtxMenu.bridgeSourceId;
+                                                        const folder =
+                                                          graphCtxMenu.bridgeFolder;
+                                                        setGraphCtxMenu(null);
+                                                        if (folder)
+                                                          switchFolderView(
+                                                            folder,
+                                                            {
+                                                              focusStageId:
+                                                                stageId,
+                                                            }
+                                                          );
+                                                      },
+                                                    }
+                                                  : null,
+                                                !graphCtxMenu.via &&
+                                                !graphCtxMenu.bridgeTargetId &&
+                                                !graphCtxMenu.bridgeSourceId
+                                                  ? {
+                                                      key: 'convert',
+                                                      label:
+                                                        'Convert to transition',
+                                                      onClick:
+                                                        onEdgeCtxConvert,
+                                                    }
+                                                  : null,
+                                                graphCtxMenu.via
+                                                  ? {
+                                                      key: 'edit',
+                                                      label: 'Edit transition',
+                                                      onClick: onEdgeCtxEdit,
+                                                    }
+                                                  : null,
+                                                graphCtxMenu.via
+                                                  ? {
+                                                      key: 'revert',
+                                                      label:
+                                                        'Revert to connection',
+                                                      onClick: onEdgeCtxRevert,
+                                                    }
+                                                  : null,
+                                              { type: 'divider' },
+                                              {
+                                                key: 'delete',
+                                                label: 'Delete',
+                                                danger: true,
+                                                onClick: onEdgeCtxDelete,
+                                              },
+                                            ]
+                                    ).filter(Boolean)}
+                                  />
+                                </div>
+                              )}
                             </div>
                           </Card>
                         </div>
@@ -2154,13 +4010,35 @@ function App() {
                                 }
                                 onClick={() => {
                                   if (!activeScene?.stages?.length) return;
-                                  const copied = [...(activeScene.tags || [])];
-                                  updateActiveScene((prev) => {
-                                    for (const stage of prev.stages) {
-                                      stage.tags = [...copied];
-                                    }
-                                  });
-                                  setEdited(true);
+                                  const hasPlumbing = activeScene.stages.some((s) =>
+                                    (s.tags || []).some(isOstimPlumbingTag)
+                                  );
+                                  const doCopy = () => {
+                                    const copied = [...(activeScene.tags || [])];
+                                    updateActiveScene((prev) => {
+                                      for (const stage of prev.stages) {
+                                        const keep = (stage.tags || []).filter(
+                                          isOstimPlumbingTag
+                                        );
+                                        const fromScene = copied.filter(
+                                          (t) => !isOstimPlumbingTag(t)
+                                        );
+                                        stage.tags = [...keep, ...fromScene];
+                                      }
+                                    });
+                                    setEdited(true);
+                                  };
+                                  if (hasPlumbing) {
+                                    Modal.confirm({
+                                      title: 'Copy scene tags to stages?',
+                                      content:
+                                        'OStim pack metadata on stages (folder, id, nav links) will be kept. Other stage tags are replaced by scene tags.',
+                                      okText: 'Copy (keep OStim tags)',
+                                      onOk: doCopy,
+                                    });
+                                  } else {
+                                    doCopy();
+                                  }
                                 }}
                               >
                                 Copy to stages
@@ -2177,6 +4055,19 @@ function App() {
                           </Space>
                         }
                       >
+                        <div style={{ marginBottom: 12 }}>
+                          <OstimFolderField
+                            tags={activeScene ? activeScene.tags : []}
+                            knownFolders={ostimFolderOptions.map((o) => o.value)}
+                            onChange={(tags) => {
+                              updateActiveScene((prev) => {
+                                prev.tags = tags;
+                              });
+                              setEdited(true);
+                            }}
+                            placeholder="Default export folder (fallback)"
+                          />
+                        </div>
                         <TagTree
                           tags={activeScene ? activeScene.tags : []}
                           onChange={(tags) => {
@@ -2187,6 +4078,7 @@ function App() {
                           }}
                           tagsSFW={activeScene ? tagsSFW : []}
                           tagsNSFW={activeScene ? tagsNSFW : []}
+                          tagsOStimActions={activeScene ? tagsOStimActions : []}
                         />
                       </Card>
                       <Card

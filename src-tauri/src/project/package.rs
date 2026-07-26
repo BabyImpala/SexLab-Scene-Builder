@@ -15,6 +15,7 @@ use crate::{
     project::{
         define::{Node, Sex},
         position::Position,
+        progress::JobProgress,
         serialize::{make_fnis_lines, make_fnis_lines_slal_sequence, map_race_to_folder},
         fnis_list::{
             lookup_fnis_objects, objects_to_anim_obj as fnis_objects_to_anim_obj,
@@ -85,15 +86,108 @@ impl EnrichSummary {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct AssetLibrary {
+    /// Behavior / HKX stems (no `.hkx` suffix).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<String>,
+    /// FNIS / anim object editor IDs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anim_objects: Vec<String>,
+    /// Equip object tokens.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equip_objects: Vec<String>,
+    /// OStim icon paths under `Interface/OStim/icons/` (no extension).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub icons: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct AssetFolderImportStats {
+    pub hkx_files: usize,
+    pub icon_files: usize,
+}
+
+impl AssetLibrary {
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+            && self.anim_objects.is_empty()
+            && self.equip_objects.is_empty()
+            && self.icons.is_empty()
+    }
+
+    fn push_unique(list: &mut Vec<String>, raw: &str) {
+        let trimmed = raw.trim().trim_end_matches(".hkx").trim_end_matches(".HKX");
+        if trimmed.is_empty() {
+            return;
+        }
+        let key = trimmed.to_ascii_lowercase();
+        if list
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(&key) || e.to_ascii_lowercase() == key)
+        {
+            return;
+        }
+        list.push(trimmed.to_string());
+    }
+
+    pub fn merge_from(&mut self, other: &AssetLibrary) {
+        for e in &other.events {
+            Self::push_unique(&mut self.events, e);
+        }
+        for e in &other.anim_objects {
+            Self::push_unique(&mut self.anim_objects, e);
+        }
+        for e in &other.equip_objects {
+            Self::push_unique(&mut self.equip_objects, e);
+        }
+        for e in &other.icons {
+            Self::push_unique(&mut self.icons, e);
+        }
+        self.sort();
+    }
+
+    pub fn sort(&mut self) {
+        self.events.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+        self.anim_objects
+            .sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+        self.equip_objects
+            .sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+        self.icons
+            .sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+    }
+
+    fn ingest_anim_obj_blob(&mut self, blob: &str) {
+        for tok in blob.split(|c: char| c == ',' || c.is_whitespace()) {
+            Self::push_unique(&mut self.anim_objects, tok);
+        }
+    }
+
+    fn ingest_equip_blob(&mut self, blob: &str) {
+        for tok in blob.split(|c: char| c == ',' || c.is_whitespace()) {
+            Self::push_unique(&mut self.equip_objects, tok);
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Package {
     #[serde(default)]
     pub version: u8,
     #[serde(skip)]
     pub pack_path: PathBuf,
-    /// Folder used for OStim import; HKX clips are copied from here on SLSB export.
-    #[serde(skip)]
+    /// Folder used for OStim import; HKX / Sound / Nemesis copied from here on export when present.
+    /// Persisted in project JSON so reopen can still find binaries (absolute path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ostim_source: Option<PathBuf>,
+    /// Small OStim text assets embedded for portable round-trip (facial expressions, custom
+    /// actions, …). Keys are paths relative to `SKSE/Plugins/OStim/` (forward slashes).
+    /// Survives `.slsb.json` save; `.slr` has no slot for these.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub ostim_assets: IndexMap<String, String>,
+    /// Known HKX stems / anim objects / equip objects for authoring autocomplete.
+    #[serde(default, skip_serializing_if = "AssetLibrary::is_empty")]
+    pub asset_library: AssetLibrary,
 
     pub pack_name: String,
     pub pack_author: String,
@@ -103,18 +197,171 @@ pub struct Package {
     pub scenes: IndexMap<NanoID, Scene>,
 }
 
+/// Map `…/Interface/OStim/icons/Pack/foo.dds` → `Pack/foo` (forward slashes).
+fn ostim_icon_path_from_file(scan_root: &Path, file: &Path) -> Option<String> {
+    let file_norm = normalize_path_for_cmp(file);
+    let lower = file_norm.to_ascii_lowercase();
+    const MARKER: &str = "interface/ostim/icons/";
+    if let Some(idx) = lower.find(MARKER) {
+        let after = &file_norm[idx + MARKER.len()..];
+        let stem = Path::new(after).with_extension("");
+        let s = stem.to_string_lossy().replace('\\', "/");
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    // Icons dumped next to a shallow pick (folder is already `…/icons` or a pack subfolder).
+    let scan_norm = normalize_path_for_cmp(scan_root);
+    let scan_lower = scan_norm.to_ascii_lowercase();
+    if scan_lower.ends_with("ostim/icons")
+        || scan_lower.contains("ostim/icons/")
+        || scan_lower.ends_with("/icons")
+    {
+        if let Ok(rel) = file.strip_prefix(scan_root) {
+            let stem = rel.with_extension("");
+            let s = stem.to_string_lossy().replace('\\', "/");
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+fn normalize_path_for_cmp(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn looks_like_data_root(path: &Path) -> bool {
+    path.join("meshes").is_dir()
+        || path.join("Interface").is_dir()
+        || path.join("interface").is_dir()
+        || path.join("SKSE").is_dir()
+        || path.join("skse").is_dir()
+}
+
+/// Prefer a Skyrim Data / pack root when the user picks a nested folder.
+fn find_data_like_root(picked: &Path) -> Option<PathBuf> {
+    if looks_like_data_root(picked) {
+        return Some(picked.to_path_buf());
+    }
+    for anc in picked.ancestors().skip(1) {
+        if looks_like_data_root(anc) {
+            return Some(anc.to_path_buf());
+        }
+    }
+    None
+}
+
 impl Package {
     pub fn new() -> Self {
         Self {
             version: VERSION, // current version
             pack_path: Default::default(),
             ostim_source: None,
+            ostim_assets: IndexMap::new(),
+            asset_library: AssetLibrary::default(),
             pack_name: Default::default(),
             pack_author: Default::default(),
             pack_version: Default::default(),
             prefix_hash: NanoID::new_prefix(),
             scenes: IndexMap::new(),
         }
+    }
+
+    /// Rebuild autocomplete catalogs from every stage position in the pack.
+    pub fn rebuild_asset_library(&mut self) {
+        let mut lib = AssetLibrary::default();
+        for scene in self.scenes.values() {
+            for stage in &scene.stages {
+                for pos in &stage.positions {
+                    for ev in &pos.event {
+                        AssetLibrary::push_unique(&mut lib.events, ev);
+                    }
+                    lib.ingest_anim_obj_blob(&pos.anim_obj);
+                    lib.ingest_equip_blob(&pos.equip_objects);
+                }
+            }
+        }
+        // Keep manually imported entries that aren't currently referenced.
+        lib.merge_from(&self.asset_library);
+        lib.sort();
+        self.asset_library = lib;
+    }
+
+    pub fn merge_asset_library(&mut self, other: &AssetLibrary) {
+        self.asset_library.merge_from(other);
+    }
+
+    /// Fold one stage's position strings into the project library (stage save path).
+    pub fn ingest_stage_assets(&mut self, stage: &Stage) {
+        for pos in &stage.positions {
+            for ev in &pos.event {
+                AssetLibrary::push_unique(&mut self.asset_library.events, ev);
+            }
+            self.asset_library.ingest_anim_obj_blob(&pos.anim_obj);
+            self.asset_library.ingest_equip_blob(&pos.equip_objects);
+        }
+        self.asset_library.sort();
+    }
+
+    /// Scan a folder tree for `.hkx` stems and OStim icon graphics; merge into the library.
+    /// When `root` looks like a Skyrim Data / pack root, remember it as `ostim_source`
+    /// (if unset) so later export can copy binaries.
+    pub fn import_asset_library_folder(
+        &mut self,
+        root: &Path,
+    ) -> Result<(AssetLibrary, AssetFolderImportStats), String> {
+        if !root.is_dir() {
+            return Err(format!("Not a directory: {}", root.display()));
+        }
+        let mut found = AssetLibrary::default();
+        let mut stats = AssetFolderImportStats::default();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let rd = match fs::read_dir(&dir) {
+                Ok(rd) => rd,
+                Err(e) => {
+                    info!("Skipping {}: {}", dir.display(), e);
+                    continue;
+                }
+            };
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                let Some(ext) = p.extension().and_then(|x| x.to_str()) else {
+                    continue;
+                };
+                if ext.eq_ignore_ascii_case("hkx") {
+                    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                        AssetLibrary::push_unique(&mut found.events, stem);
+                        stats.hkx_files += 1;
+                    }
+                    continue;
+                }
+                if !(ext.eq_ignore_ascii_case("dds")
+                    || ext.eq_ignore_ascii_case("png")
+                    || ext.eq_ignore_ascii_case("svg"))
+                {
+                    continue;
+                }
+                if let Some(icon) = ostim_icon_path_from_file(root, &p) {
+                    AssetLibrary::push_unique(&mut found.icons, &icon);
+                    stats.icon_files += 1;
+                }
+            }
+        }
+        found.sort();
+        self.merge_asset_library(&found);
+        if self.ostim_source.is_none() {
+            if let Some(pack_root) = find_data_like_root(root) {
+                self.ostim_source = Some(pack_root);
+            }
+        }
+        Ok((self.asset_library.clone(), stats))
     }
 
     pub fn from_file(file: std::fs::File) -> Result<Package, String> {
@@ -176,7 +423,11 @@ impl Package {
         None
     }
 
-    pub fn load_project(&mut self, app: &tauri::AppHandle) -> Result<(), String> {
+    pub fn load_project(
+        &mut self,
+        app: &tauri::AppHandle,
+        progress: &JobProgress<'_>,
+    ) -> Result<(), String> {
         let path = app
             .dialog()
             .file()
@@ -185,6 +436,7 @@ impl Package {
             .ok_or("No path to load project from".to_string())?
             .into_path()
             .map_err(|e| e.to_string())?;
+        progress.start("Opening project…");
         *self = Package::from_file(fs::File::open(&path).map_err(|e| e.to_string())?)?;
         self.pack_path = path.into();
         Ok(())
@@ -209,6 +461,7 @@ impl Package {
     }
 
     pub fn write(&mut self, path: PathBuf) -> Result<(), String> {
+        self.rebuild_asset_library();
         let file = fs::File::create(&path).map_err(|e| e.to_string())?;
         serde_json::to_writer_pretty(BufWriter::new(file), self)
             .map_err(|e| e.to_string())?;
@@ -217,7 +470,11 @@ impl Package {
         Ok(())
     }
 
-    pub fn load_slal(&mut self, app: &tauri::AppHandle) -> Result<(), String> {
+    pub fn load_slal(
+        &mut self,
+        app: &tauri::AppHandle,
+        progress: &JobProgress<'_>,
+    ) -> Result<(), String> {
         let path = app
             .dialog()
             .file()
@@ -227,10 +484,15 @@ impl Package {
             .into_path()
             .map_err(|e| e.to_string())?;
 
-        Package::from_slal_pack(path).map(|prjct| *self = prjct)
+        progress.start("Importing SLAL pack…");
+        Package::from_slal_pack(path, Some(progress)).map(|prjct| *self = prjct)
     }
 
-    pub fn load_ostim(&mut self, app: &tauri::AppHandle) -> Result<(), String> {
+    pub fn load_ostim(
+        &mut self,
+        app: &tauri::AppHandle,
+        progress: &JobProgress<'_>,
+    ) -> Result<(), String> {
         let path = app
             .dialog()
             .file()
@@ -240,16 +502,21 @@ impl Package {
             .into_path()
             .map_err(|e| e.to_string())?;
 
-        Package::from_ostim(path).map(|prjct| *self = prjct)
+        progress.start("Importing OStim pack…");
+        Package::from_ostim(path, Some(progress)).map(|prjct| *self = prjct)
     }
 
-    pub fn from_ostim(path: PathBuf) -> Result<Package, String> {
+    pub fn from_ostim(path: PathBuf, progress: Option<&JobProgress<'_>>) -> Result<Package, String> {
         let (pack_name, _author, scenes, summary) =
-            crate::project::ostim::import_ostim_scenes(&path)?;
+            crate::project::ostim::import_ostim_scenes_with_progress(&path, progress)?;
         let mut prjct = Package::new();
         prjct.pack_name = pack_name;
         prjct.scenes = scenes;
         prjct.ostim_source = Some(path.clone());
+        if let Some(p) = progress {
+            p.phase("Collecting OStim text assets…");
+        }
+        prjct.ostim_assets = crate::project::ostim::export::collect_ostim_text_assets(&path)?;
         prjct.version = VERSION;
         println!(
             "Loaded {} SLSB scene(s) from {} OStim node(s) ({} transitions) in {} JSON file(s) under {}",
@@ -259,6 +526,12 @@ impl Package {
             summary.files_read,
             path.display()
         );
+        if !prjct.ostim_assets.is_empty() {
+            println!(
+                "Embedded {} OStim text asset(s) (facial expressions / actions / …)",
+                prjct.ostim_assets.len()
+            );
+        }
         if summary.auto_transitions_linked > 0 || summary.auto_transitions_missing > 0 {
             println!(
                 "autoTransitions: {} linked, {} missing destinations",
@@ -409,21 +682,33 @@ impl Package {
     }
 
     /// Import a SLAL pack folder: locate JSON, then auto-enrich FNIS lists and sources.txt.
-    pub fn from_slal_pack(dir: PathBuf) -> Result<Package, String> {
+    pub fn from_slal_pack(
+        dir: PathBuf,
+        progress: Option<&JobProgress<'_>>,
+    ) -> Result<Package, String> {
         if !dir.is_dir() {
             return Err(format!(
                 "SLAL pack path is not a folder: {}",
                 dir.display()
             ));
         }
+        if let Some(p) = progress {
+            p.phase("Reading SLAL JSON…");
+        }
         let json_path = find_slal_json(&dir)?;
         let mut prjct = Package::from_slal(json_path.clone())?;
 
         let mut fnis_lists = Vec::new();
         let mut source_files = Vec::new();
+        if let Some(p) = progress {
+            p.phase("Scanning FNIS lists and sources…");
+        }
         collect_slal_enrich_files(&dir, &mut fnis_lists, &mut source_files)?;
 
         if !fnis_lists.is_empty() {
+            if let Some(p) = progress {
+                p.phase("Enriching from FNIS lists…");
+            }
             let summary = prjct.enrich_from_fnis_paths(&fnis_lists)?;
             println!(
                 "FNIS enrich: {} list(s), {} event(s), {} position(s) updated, {} unmatched",
@@ -438,6 +723,9 @@ impl Package {
         }
 
         if !source_files.is_empty() {
+            if let Some(p) = progress {
+                p.phase("Enriching from SLAnim sources…");
+            }
             let summary = prjct.enrich_from_slanim_paths(&source_files)?;
             println!(
                 "SLAnim sources enrich: {} file(s), {} anim(s), {} scene(s) enriched, {} unmatched",
@@ -499,8 +787,12 @@ impl Package {
                 let mut actor_strap_on = false;
 
                 if scene.stages.is_empty() {
-                    for _ in 0..events.len() {
-                        scene.stages.push(Stage::new(&scene));
+                    let total = events.len();
+                    for i in 0..total {
+                        let mut stage = Stage::new(&scene);
+                        // Stage::new uses n/n while pushing; SLAL knows the final count.
+                        stage.name = format!("Stage {}/{}", i + 1, total);
+                        scene.stages.push(stage);
                     }
                     if scene.stages.is_empty() {
                         return Err("Scene has no stages".into());
@@ -716,25 +1008,47 @@ impl Package {
 
     pub fn export_as(&self, app: &tauri::AppHandle, kind: ExportKind) -> Result<(), String> {
         let (pack_root, _) = self.pick_export_paths(app, kind)?;
-        self.export_into(&pack_root, kind)
+        self.export_into(&pack_root, kind, None)
     }
 
-    pub fn export_into(&self, pack_root: &Path, kind: ExportKind) -> Result<(), String> {
+    pub fn export_into(
+        &self,
+        pack_root: &Path,
+        kind: ExportKind,
+        progress: Option<&JobProgress<'_>>,
+    ) -> Result<(), String> {
         match kind {
             ExportKind::Slsb => {
-                self.build(pack_root.to_path_buf())
+                self.build(pack_root.to_path_buf(), progress)
                     .map_err(|e| e.to_string())?;
+                if let Some(p) = progress {
+                    p.phase("Copying OStim HKX clips…");
+                }
                 self.copy_ostim_hkx_after_export(pack_root)?;
                 Ok(())
             }
-            ExportKind::Slal => self.write_slal_pack(&pack_root.to_path_buf()),
+            ExportKind::Slal => {
+                if let Some(p) = progress {
+                    p.phase("Writing SLAL pack…");
+                }
+                self.write_slal_pack(&pack_root.to_path_buf())
+            }
             ExportKind::Both => {
                 let slsb_root = pack_root.join("SLSB");
-                self.build(slsb_root.clone()).map_err(|e| e.to_string())?;
+                self.build(slsb_root.clone(), progress)
+                    .map_err(|e| e.to_string())?;
+                if let Some(p) = progress {
+                    p.phase("Copying OStim HKX clips…");
+                }
                 self.copy_ostim_hkx_after_export(&slsb_root)?;
+                if let Some(p) = progress {
+                    p.phase("Writing SLAL pack…");
+                }
                 self.write_slal_pack(&pack_root.join("SLAL"))
             }
-            ExportKind::Ostim => self.write_ostim_pack(pack_root, self.ostim_source.as_deref()),
+            ExportKind::Ostim => {
+                self.write_ostim_pack(pack_root, self.ostim_source.as_deref(), progress)
+            }
         }
     }
 
@@ -753,9 +1067,10 @@ impl Package {
         &self,
         root_dir: &Path,
         hkx_source: Option<&Path>,
+        progress: Option<&JobProgress<'_>>,
     ) -> Result<(), String> {
         let summary =
-            crate::project::ostim::write_ostim_pack(self, root_dir, hkx_source)?;
+            crate::project::ostim::write_ostim_pack(self, root_dir, hkx_source, progress)?;
         println!(
             "Exported {} OStim JSON file(s) ({} scene group(s)), {} hkx copied",
             summary.json_files, summary.scenes_written, summary.hkx_copied
@@ -763,17 +1078,48 @@ impl Package {
         if let Some(list) = summary.animlist {
             println!("Animlist: {}", list.display());
         }
+        if summary.facial_copied {
+            println!("Facial expressions: present in export");
+        }
+        if summary.assets_written > 0 {
+            println!("Embedded OStim assets written: {}", summary.assets_written);
+        }
+        if summary.sound_copied {
+            println!("Sound: copied from OStim source");
+        }
         if let Some(nem) = summary.nemesis_dir {
-            println!("Nemesis stub: {}", nem.display());
+            if summary.nemesis_from_source {
+                println!("Nemesis: copied source patches under {}", nem.display());
+            } else if summary.nemesis_synthesized {
+                println!("Nemesis: synthesized OStimSpeed patches under {}", nem.display());
+            } else {
+                println!("Nemesis: {}", nem.display());
+            }
         }
         Ok(())
     }
 
-    pub fn build(&self, root_dir: PathBuf) -> Result<(), std::io::Error> {
+    pub fn build(
+        &self,
+        root_dir: PathBuf,
+        progress: Option<&JobProgress<'_>>,
+    ) -> Result<(), std::io::Error> {
         println!("Compiling project {}", self.pack_name);
+        if let Some(p) = progress {
+            p.phase("Writing SLSB pack…");
+        }
         self.write_pack_merged(&root_dir, |staging| {
+            if let Some(p) = progress {
+                p.phase("Writing binary registry…");
+            }
             self.write_binary_file(staging)?;
+            if let Some(p) = progress {
+                p.phase("Writing FNIS lists…");
+            }
             self.write_fnis_files_slsb(staging)?;
+            if let Some(p) = progress {
+                p.phase("Generating behaviors…");
+            }
             self.generate_behaviors(staging)?;
             Ok(())
         })?;
@@ -1039,13 +1385,13 @@ impl Package {
         flush_fnis_lists(root_dir, &self.fnis_mod_name(), &borrowed, true).map_err(|e| e.to_string())
     }
 
-    /// FNIS / SLAL path stem: package name only (matches convert-script anim dirs).
+    /// FNIS / SLAL / OStim path stem: filesystem-safe form of the package name.
     pub fn fnis_mod_name(&self) -> String {
         let trimmed = self.pack_name.trim();
         if trimmed.is_empty() {
             self.prefix_hash.0.clone()
         } else {
-            trimmed.to_string()
+            crate::project::ostim::events::sanitize_ostim_id(trimmed, &self.prefix_hash.0)
         }
     }
 
@@ -1839,7 +2185,8 @@ impl EncodeBinary for Package {
 mod tests {
     use super::{
         dir_nonempty, flush_fnis_lists, infer_add_cum, merge_dir_contents,
-        scene_to_slal_animation, strip_actor_stage_suffix, write_fnis_line, Package,
+        ostim_icon_path_from_file, scene_to_slal_animation, strip_actor_stage_suffix,
+        write_fnis_line, Package,
     };
     use crate::project::define::Sex;
     use crate::project::position::Position;
@@ -1851,6 +2198,43 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn import_asset_library_folder_scans_hkx_and_icons() {
+        let root = std::env::temp_dir().join(format!(
+            "slsb_asset_scan_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let anim = root.join("meshes/actors/character/animations");
+        let icons = root.join("Interface/OStim/icons/PackMe");
+        fs::create_dir_all(&anim).unwrap();
+        fs::create_dir_all(&icons).unwrap();
+        fs::write(anim.join("MyClip_A1_S1.hkx"), b"x").unwrap();
+        fs::write(icons.join("logo.dds"), b"x").unwrap();
+
+        let mut pack = Package::new();
+        let (lib, stats) = pack.import_asset_library_folder(&root).unwrap();
+        assert_eq!(stats.hkx_files, 1);
+        assert_eq!(stats.icon_files, 1);
+        assert!(lib.events.iter().any(|e| e == "MyClip_A1_S1"));
+        assert!(lib.icons.iter().any(|e| e == "PackMe/logo"));
+        assert_eq!(
+            pack.ostim_source.as_ref().map(|p| p.as_path()),
+            Some(root.as_path())
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ostim_icon_path_parses_interface_layout() {
+        let root = PathBuf::from("/mods/MyPack");
+        let file = root.join("Interface/OStim/icons/Bloobawg/BDG/tsb_blf.dds");
+        assert_eq!(
+            ostim_icon_path_from_file(&root, &file).as_deref(),
+            Some("Bloobawg/BDG/tsb_blf")
+        );
+    }
 
     fn test_stage(id: &str, positions: Vec<Position>, sound: &str) -> Stage {
         Stage {
@@ -1944,7 +2328,7 @@ mod tests {
         let out = std::env::temp_dir().join(format!("slsb_pack_paths_{}", std::process::id()));
         let _ = fs::remove_dir_all(&out);
         fs::create_dir_all(&out).unwrap();
-        pack.build(out.clone()).unwrap();
+        pack.build(out.clone(), None).unwrap();
         let slr = out
             .join("SKSE")
             .join("SexLab")
@@ -2195,7 +2579,7 @@ mod tests {
         )
         .unwrap();
 
-        let pack = Package::from_slal_pack(tmp.clone()).unwrap();
+        let pack = Package::from_slal_pack(tmp.clone(), None).unwrap();
         assert_eq!(pack.pack_name, "TestPack");
         assert_eq!(pack.scenes.len(), 1);
         let scene = pack.scenes.values().next().unwrap();
@@ -2203,6 +2587,49 @@ mod tests {
             scene.stages[0].positions[0].anim_obj,
             "AOChairA,AOShockyDogDildoB"
         );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn from_slal_names_stages_with_total_count() {
+        let tmp = std::env::temp_dir().join(format!(
+            "slsb_slal_stage_names_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let json = tmp.join("pack.json");
+        fs::write(
+            &json,
+            r#"{
+  "name": "NamePack",
+  "animations": [
+    {
+      "name": "Multi",
+      "creature_race": "",
+      "tags": "",
+      "actors": [
+        {
+          "type": "female",
+          "stages": [
+            { "id": "evt_S1" },
+            { "id": "evt_S2" },
+            { "id": "evt_S3" }
+          ]
+        }
+      ]
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let pack = Package::from_slal(json).unwrap();
+        let scene = pack.scenes.values().next().unwrap();
+        assert_eq!(scene.stages.len(), 3);
+        assert_eq!(scene.stages[0].name, "Stage 1/3");
+        assert_eq!(scene.stages[1].name, "Stage 2/3");
+        assert_eq!(scene.stages[2].name, "Stage 3/3");
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -2301,7 +2728,7 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&out);
-        project.build(out.clone()).unwrap();
+        project.build(out.clone(), None).unwrap();
 
         let list = out
             .join("meshes")

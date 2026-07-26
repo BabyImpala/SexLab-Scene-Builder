@@ -19,6 +19,14 @@ mod tests {
         anim_root().join("OStim/Lovemaking Compendium for OStim Standalone")
     }
 
+    fn ostim_bloo() -> PathBuf {
+        anim_root().join("OStim/Bloo")
+    }
+
+    fn ostim_sanguine() -> PathBuf {
+        anim_root().join("OStim/Sanguine Seduction 1.2.5")
+    }
+
     fn billy_furniture_slsb() -> PathBuf {
         anim_root().join(
             "SLR/Billy/SLAL_Billyy_HumanFurnitureInvis/SKSE/SexLab/Registry/Source/Billyy_HumanFurnitureInvis.slsb.json",
@@ -110,15 +118,16 @@ mod tests {
         if !root.exists() {
             return;
         }
-        let pack = Package::from_ostim(root.clone()).unwrap();
+        let pack = Package::from_ostim(root.clone(), None).unwrap();
         assert!(
             pack.ostim_source.as_ref().map(|p| p == &root).unwrap_or(false),
             "ostim_source should remember import root"
         );
+        assert_eq!(pack.pack_name, "Moon Lovemaking Compendium");
         assert!(
-            !pack.pack_name.contains(' '),
-            "pack_name should be FNIS-safe, got {}",
-            pack.pack_name
+            !crate::project::ostim::export::pack_folder_name(&pack).contains(' '),
+            "export folder must be filesystem-safe, got {}",
+            crate::project::ostim::export::pack_folder_name(&pack)
         );
         assert!(
             (10..=40).contains(&pack.scenes.len()),
@@ -174,32 +183,38 @@ mod tests {
                     } else if pos.event.first().map(|e| e.contains('_')).unwrap_or(false) {
                         ostim_events += 1;
                     }
-                    if pos.tags.iter().any(|t| t.starts_with("ostim_sos:")) {
+                    if pos.tags.iter().any(|t| t.starts_with("ostim_sos:"))
+                        || pos.schlong != 0
+                    {
                         tagged_sos += 1;
                     }
                 }
                 if stage
-                    .extra
-                    .nav_text
-                    .split(';')
-                    .any(|p| p.starts_with("3000:"))
+                    .tags
+                    .iter()
+                    .any(|t| t.starts_with("ostim_nav:3000:"))
+                    || stage
+                        .extra
+                        .nav_text
+                        .split(';')
+                        .any(|p| p.starts_with("3000:"))
                 {
                     auto_climax_edges += 1;
                 }
             }
         }
         assert!(ostim_events > 100, "expected OStim-style events, got {ostim_events}");
-        assert!(tagged_sos > 0, "expected ostim_sos tags in .slr-bound position tags");
+        assert!(tagged_sos > 0, "expected sosBend/schlong values from OStim actors");
         assert!(
             auto_climax_edges > 0,
-            "expected climax autoTransition/nav edges encoded in nav_text"
+            "expected climax autoTransition/nav edges encoded in ostim_nav tags or nav_text"
         );
 
         // Build .slr pack (registry + FNIS) — must succeed for usability
         let tmp = std::env::temp_dir().join(format!("slsb_ostim2slr_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
-        pack.build(tmp.clone()).unwrap();
+        pack.build(tmp.clone(), None).unwrap();
         let registry = tmp.join("SKSE/SexLab/Registry");
         assert!(registry.is_dir(), "missing Registry after build");
         let slr_files: Vec<_> = fs::read_dir(&registry)
@@ -232,25 +247,65 @@ mod tests {
         let mut rt = Package::new();
         rt.pack_name = pack_name;
         rt.scenes = scenes;
-        let out = write_ostim_pack(&rt, &tmp.join("ostim_rt"), None).unwrap();
+        rt.ostim_source = Some(root.clone());
+        let out = write_ostim_pack(&rt, &tmp.join("ostim_rt"), Some(&root), None).unwrap();
         assert!(out.json_files >= 300);
-        // Spot-check a known MLC scene
-        let cowgirl = tmp
-            .join("ostim_rt")
-            .join(sanitize_pack_folder(&rt.pack_name))
-            .join("SKSE/Plugins/OStim/scenes/MLCBedCowgirl/MLCBedCowgirl.json");
-        // pack folder may differ — search
+        assert!(out.facial_copied, "facial expressions should copy from source");
+        assert!(
+            out.nemesis_from_source,
+            "Nemesis patches should copy from source when present"
+        );
         let found = find_named_json(&tmp.join("ostim_rt"), "MLCBedCowgirl.json");
         assert!(found.is_some(), "MLCBedCowgirl.json missing after round-trip");
+        let cowgirl_path = found.unwrap();
+        assert!(
+            cowgirl_path
+                .to_string_lossy()
+                .replace('\\', "/")
+                .ends_with("scenes/MLCBedCowgirl/MLCBedCowgirl.json"),
+            "expected per-node folder layout, got {}",
+            cowgirl_path.display()
+        );
         let json: Value =
-            serde_json::from_str(&fs::read_to_string(found.unwrap()).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(&cowgirl_path).unwrap()).unwrap();
         assert_ostim_scene_usable("MLCBedCowgirl", &json);
         let actors = json.get("actors").and_then(|a| a.as_array()).unwrap();
         assert!(
             actors.iter().any(|a| a.get("lookUp").is_some()),
             "lookUp should survive OStim→SLSB→OStim round-trip"
         );
-        let _ = cowgirl;
+        let actions = json.get("actions").and_then(|a| a.as_array()).unwrap();
+        assert_eq!(
+            actions.len(),
+            3,
+            "actions must not pull in sibling-stage tags, got {actions:?}"
+        );
+        assert_eq!(
+            json.get("modpack").and_then(|v| v.as_str()),
+            Some("Moon Lovemaking Compendium")
+        );
+
+        let kneeling = find_named_json(&tmp.join("ostim_rt"), "MLCBedKneelingIdle.json");
+        assert!(kneeling.is_some());
+        let kn: Value =
+            serde_json::from_str(&fs::read_to_string(kneeling.unwrap()).unwrap()).unwrap();
+        let navs = kn.get("navigations").and_then(|n| n.as_array()).unwrap();
+        assert!(
+            navs.iter().any(|n| n.get("origin").and_then(|v| v.as_str())
+                == Some("OStim2PBothLyingMF")),
+            "inbound origin nav to vanilla must survive, got {navs:?}"
+        );
+        assert!(
+            navs.iter().any(|n| n.get("destination").and_then(|v| v.as_str())
+                == Some("OStim2PBothLyingMF")),
+            "Return destination to vanilla must survive, got {navs:?}"
+        );
+
+        let facial = tmp
+            .join("ostim_rt")
+            .join(crate::project::ostim::export::pack_folder_name(&rt))
+            .join("SKSE/Plugins/OStim/facial expressions/mlcbeinghappy1.json");
+        assert!(facial.exists(), "facial expression JSON missing");
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -277,10 +332,37 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("slsb_slr2ostim_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
-        let summary = write_ostim_pack(&pack, &tmp, None).unwrap();
+        let summary = write_ostim_pack(&pack, &tmp, None, None).unwrap();
         assert!(summary.json_files > 0);
         assert!(summary.animlist.as_ref().unwrap().exists());
-        assert!(summary.nemesis_dir.as_ref().unwrap().join("info.ini").exists());
+        assert!(
+            summary.nemesis_synthesized,
+            "SexLab→OStim should synthesize Nemesis patches when no OStim source"
+        );
+        let nem = summary.nemesis_dir.as_ref().unwrap();
+        assert!(nem.join("info.ini").exists());
+        assert!(
+            nem.join("0_master").join("#0340.txt").exists(),
+            "expected synthesized #0340 root inject"
+        );
+        // Spot-check OStimSpeed binding exists somewhere under 0_master
+        let master = nem.join("0_master");
+        let mut found_speed = false;
+        if let Ok(rd) = fs::read_dir(&master) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("txt") {
+                    continue;
+                }
+                if let Ok(body) = fs::read_to_string(&p) {
+                    if body.contains("OStimSpeed") && body.contains("playbackSpeed") {
+                        found_speed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(found_speed, "expected OStimSpeed clip bindings in synthesized patches");
 
         let mut checked = 0usize;
         let mut with_furniture = 0usize;
@@ -380,10 +462,109 @@ mod tests {
         assert_eq!(actor0["animationIndex"], 1);
         assert_eq!(actor0["expressionOverride"], "tongue");
         assert_eq!(actor0["equipObjects"]["strapon"], true);
+        assert_eq!(actor0["type"], "npc");
+        assert_eq!(actor0["feetOnGround"], false);
     }
 
-    fn sanitize_pack_folder(name: &str) -> String {
-        crate::project::ostim::events::sanitize_ostim_id(name, "pack")
+    #[test]
+    fn bloo_embeds_facial_and_preserves_expressions() {
+        let root = ostim_bloo();
+        if !root.exists() {
+            return;
+        }
+        let pack = Package::from_ostim(root.clone(), None).unwrap();
+        assert!(
+            pack.ostim_assets
+                .keys()
+                .any(|k| k.contains("facial expressions/")),
+            "Bloo facial JSON should be embedded in project IR"
+        );
+        assert!(
+            pack.ostim_assets
+                .keys()
+                .any(|k| k.contains("actions/")),
+            "Bloo custom actions should be embedded"
+        );
+
+        // Spot-check expressionOverride survived import
+        let with_expr = pack.scenes.values().any(|s| {
+            s.stages.iter().any(|st| {
+                st.positions
+                    .iter()
+                    .any(|p| p.expression_override == "eyesclosed")
+            })
+        });
+        assert!(with_expr, "expected eyesclosed expressionOverride from Bloo");
+
+        // Export WITHOUT hkx_source — assets must still write from ostim_assets
+        let tmp = std::env::temp_dir().join(format!("slsb_bloo_embed_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let mut portable = pack.clone();
+        // Simulate save/reload where path may be gone but assets remain
+        portable.ostim_source = None;
+        let summary = write_ostim_pack(&portable, &tmp, None, None).unwrap();
+        assert!(summary.assets_written >= 4);
+        assert!(summary.facial_copied);
+        let face = find_named_json(&tmp, "eyesclosed1.json");
+        assert!(face.is_some(), "embedded facial must export without source folder");
+        let scene = find_named_json(&tmp, "BDG_Lay_Idle_Hand_Kiss.json");
+        assert!(scene.is_some());
+        let json: Value =
+            serde_json::from_str(&fs::read_to_string(scene.unwrap()).unwrap()).unwrap();
+        assert!(
+            json["actors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a.get("expressionOverride").and_then(|v| v.as_str()) == Some("eyesclosed"))
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sanguine_preserves_expression_action_and_scale_height() {
+        let root = ostim_sanguine();
+        if !root.exists() {
+            return;
+        }
+        let pack = Package::from_ostim(root.clone(), None).unwrap();
+        assert_eq!(pack.pack_name, "sss"); // modPack camelCase
+        let bite = pack.scenes.values().find(|s| {
+            s.stages.iter().any(|st| {
+                st.tags
+                    .iter()
+                    .any(|t| t == "ostim_id:SSBittingDS")
+            })
+        });
+        assert!(bite.is_some(), "SSBittingDS missing");
+        let stage = bite
+            .unwrap()
+            .stages
+            .iter()
+            .find(|st| st.tags.iter().any(|t| t == "ostim_id:SSBittingDS"))
+            .unwrap();
+        assert_eq!(stage.positions[1].expression_action, Some(1));
+        assert!(
+            stage.positions[0]
+                .scale_height
+                .map(|h| (h - 120.748).abs() < 0.01)
+                .unwrap_or(false)
+        );
+
+        let tmp = std::env::temp_dir().join(format!("slsb_sang_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let summary = write_ostim_pack(&pack, &tmp, Some(&root), None).unwrap();
+        assert!(summary.json_files >= 18);
+        let found = find_named_json(&tmp, "SSBittingDS.json").unwrap();
+        let json: Value = serde_json::from_str(&fs::read_to_string(found).unwrap()).unwrap();
+        assert_eq!(json["actors"][1]["expressionAction"], 1);
+        assert!((json["actors"][0]["scaleHeight"].as_f64().unwrap() - 120.748).abs() < 0.01);
+        assert_eq!(json["actors"][0]["type"], "npc");
+        assert_eq!(json["actors"][1]["lookUp"], -50);
+        assert_eq!(json["actors"][1]["lookLeft"], 100);
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     fn find_named_json(root: &PathBuf, file_name: &str) -> Option<PathBuf> {

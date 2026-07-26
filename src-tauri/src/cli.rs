@@ -47,7 +47,7 @@ pub fn convert_ostim(
       return Err("output dir is invalid".to_string());
   }
 
-  let mut project = Package::from_ostim(in_path.clone())?;
+  let mut project = Package::from_ostim(in_path.clone(), None)?;
   let mut out_path = out_dir.join(
     if project.pack_name.trim().is_empty() {
       "ostim_pack".to_string()
@@ -104,7 +104,7 @@ pub fn build(
     .map(|a| matches!(a.value, serde_json::Value::Bool(true)))
     .unwrap_or(false);
 
-  project.build(out_dir.clone()).map_err(|e| e.to_string())?;
+  project.build(out_dir.clone(), None).map_err(|e| e.to_string())?;
   if with_slal {
     project.write_slal_pack(&out_dir.join("SLAL"))?;
   }
@@ -115,7 +115,7 @@ pub fn build(
         serde_json::Value::String(v) if !v.is_empty() => Some(PathBuf::from(v)),
         _ => None,
       });
-    project.write_ostim_pack(&out_dir.join("OStim"), hkx.as_deref())?;
+    project.write_ostim_pack(&out_dir.join("OStim"), hkx.as_deref(), None)?;
   }
   Ok(())
 }
@@ -172,7 +172,7 @@ pub fn export_ostim(
 
   let file = std::fs::File::open(&in_path).map_err(|e| e.to_string())?;
   let project = Package::from_file(file)?;
-  project.write_ostim_pack(&out_dir, hkx.as_deref())
+  project.write_ostim_pack(&out_dir, hkx.as_deref(), None)
 }
 
 pub fn generate_behaviors(
