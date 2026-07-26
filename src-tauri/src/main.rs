@@ -670,9 +670,36 @@ fn reload_project(reload_type: &str, window: &tauri::WebviewWindow) {
     }
     // Import leaves an unsaved in-memory project until Save As
     set_edited(reload_type == IMPORT_SLAL || reload_type == IMPORT_OSTIM);
+    if reload_type == IMPORT_SLAL || reload_type == IMPORT_OSTIM {
+        prjct.rebuild_asset_library();
+    }
+    let asset_summary = if reload_type == IMPORT_SLAL || reload_type == IMPORT_OSTIM {
+        Some(format!(
+            "Project library: {} HKX/events, {} icons, {} anim objects, {} equip objects.",
+            prjct.asset_library.events.len(),
+            prjct.asset_library.icons.len(),
+            prjct.asset_library.anim_objects.len(),
+            prjct.asset_library.equip_objects.len(),
+        ))
+    } else {
+        None
+    };
     // Keep the modal open; the frontend closes it after applying scenes.
     progress.update("Loading scenes into editor…", None, None);
     emit_project_update(window, &prjct);
+    if let Some(summary) = asset_summary {
+        let app = window.app_handle().clone();
+        app.dialog()
+            .message(&summary)
+            .title(if reload_type == IMPORT_OSTIM {
+                "OStim import complete"
+            } else {
+                "SLAL import complete"
+            })
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::Ok)
+            .show(|_| {});
+    }
 }
 
 fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {

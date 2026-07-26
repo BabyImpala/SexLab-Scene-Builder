@@ -168,6 +168,29 @@ impl AssetLibrary {
             Self::push_unique(&mut self.equip_objects, tok);
         }
     }
+
+    /// Icons from `ostim_nav:` / `ostim_nav_origin:` (`prio:dest:desc[:icon:border]`).
+    fn ingest_ostim_nav_icons(&mut self, tags: &[String]) {
+        for tag in tags {
+            // `ostim_nav:` is a prefix of `ostim_nav_origin:` — check origin first.
+            let enc = if let Some(rest) = tag.strip_prefix("ostim_nav_origin:") {
+                rest
+            } else if let Some(rest) = tag.strip_prefix("ostim_nav:") {
+                rest
+            } else {
+                continue;
+            };
+            for part in enc.split(';') {
+                let bits: Vec<&str> = part.trim().splitn(5, ':').collect();
+                if bits.len() >= 4 {
+                    let icon = bits[3].trim();
+                    if !icon.is_empty() {
+                        Self::push_unique(&mut self.icons, icon);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -274,6 +297,7 @@ impl Package {
         let mut lib = AssetLibrary::default();
         for scene in self.scenes.values() {
             for stage in &scene.stages {
+                lib.ingest_ostim_nav_icons(&stage.tags);
                 for pos in &stage.positions {
                     for ev in &pos.event {
                         AssetLibrary::push_unique(&mut lib.events, ev);
@@ -295,6 +319,7 @@ impl Package {
 
     /// Fold one stage's position strings into the project library (stage save path).
     pub fn ingest_stage_assets(&mut self, stage: &Stage) {
+        self.asset_library.ingest_ostim_nav_icons(&stage.tags);
         for pos in &stage.positions {
             for ev in &pos.event {
                 AssetLibrary::push_unique(&mut self.asset_library.events, ev);
@@ -518,6 +543,19 @@ impl Package {
         }
         prjct.ostim_assets = crate::project::ostim::export::collect_ostim_text_assets(&path)?;
         prjct.version = VERSION;
+        if let Some(p) = progress {
+            p.phase("Scanning HKX / icons for autocomplete…");
+        }
+        match prjct.import_asset_library_folder(&path) {
+            Ok((_, stats)) => {
+                println!(
+                    "Asset scan: {} .hkx, {} icon file(s)",
+                    stats.hkx_files, stats.icon_files
+                );
+            }
+            Err(e) => info!("Asset library folder scan skipped: {}", e),
+        }
+        prjct.rebuild_asset_library();
         println!(
             "Loaded {} SLSB scene(s) from {} OStim node(s) ({} transitions) in {} JSON file(s) under {}",
             summary.scenes_imported,
@@ -2224,6 +2262,70 @@ mod tests {
             Some(root.as_path())
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rebuild_asset_library_harvests_ostim_nav_icons() {
+        let mut pack = Package::new();
+        let mut scene = Scene::default();
+        scene.stages.push(Stage {
+            id: NanoID("s1".into()),
+            name: "One".into(),
+            positions: vec![],
+            tags: vec![
+                "ostim_nav:1000:Other:Kiss:MLC/mlc:ffffff".into(),
+                "ostim_nav_origin:500:Hub:Back:OStim/symbols/return:".into(),
+            ],
+            extra: StageExtra::default(),
+        });
+        pack.scenes.insert(NanoID("sc".into()), scene);
+        pack.rebuild_asset_library();
+        assert!(pack.asset_library.icons.iter().any(|i| i == "MLC/mlc"));
+        assert!(pack
+            .asset_library
+            .icons
+            .iter()
+            .any(|i| i == "OStim/symbols/return"));
+    }
+
+    #[test]
+    fn from_ostim_mlc_populates_icons() {
+        let root = PathBuf::from(
+            "/mnt/Data/Coding/Animations/OStim/Lovemaking Compendium for OStim Standalone",
+        );
+        if !root.is_dir() {
+            eprintln!("skip: MLC pack not present at {}", root.display());
+            return;
+        }
+        let pack = Package::from_ostim(root, None).expect("import MLC");
+        assert!(
+            !pack.asset_library.events.is_empty(),
+            "expected HKX stems"
+        );
+        assert!(
+            !pack.asset_library.icons.is_empty(),
+            "expected icons from DDS and/or ostim_nav tags; events={} icons={:?}",
+            pack.asset_library.events.len(),
+            pack.asset_library.icons
+        );
+        assert!(
+            pack.asset_library.icons.iter().any(|i| i == "MLC/mlc"),
+            "missing pack icon MLC/mlc; got {:?}",
+            pack.asset_library.icons
+        );
+        let pos_events = pack
+            .scenes
+            .values()
+            .flat_map(|s| s.stages.iter())
+            .flat_map(|st| st.positions.iter())
+            .flat_map(|p| p.event.iter())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            pack.asset_library.events.len() > pos_events.len(),
+            "loose .hkx scan should add stems beyond position events ({} vs {})",
+            pack.asset_library.events.len(),
+            pos_events.len()
+        );
     }
 
     #[test]
