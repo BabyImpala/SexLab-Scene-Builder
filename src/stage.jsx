@@ -509,19 +509,19 @@ function Editor({ _sceneId, _stage, _positions, _initialDark, _assetLibrary }) {
       <Layout style={{ minHeight: '100vh' }}>
         {contextHolder}
         <Header className="stage-header">
-          <Row align="middle" justify="space-between" wrap={false} style={{ width: '100%' }}>
-            <Col flex="none">
+          <Row align="middle" justify="space-between" wrap={false} style={{ width: '100%' }} gutter={12}>
+            <Col flex="auto" style={{ minWidth: 0 }}>
               <Input
                 id="stage-namefield-input"
                 className="stage-namefield"
                 size="large"
-                maxLength={30}
                 bordered={false}
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 defaultValue={_stage.name}
                 placeholder={'Stage Name'}
                 onFocus={(e) => e.target.select()}
+                title={name}
               />
             </Col>
             <Col flex="none">
