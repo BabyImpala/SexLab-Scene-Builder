@@ -1,11 +1,8 @@
-//! OStim animlist + Nemesis stub generation for playable pack scaffolding.
+//! OStim animlist + Nemesis scaffolding.
 //!
-//! Full Nemesis behavior graphs (clip generators, state machines, `$variableID[OStimSpeed]$`
-//! wiring across `#mod$N.txt` fragments) are pack-specific and not synthesized here.
-//! Instead we emit:
-//! - `ATT_*_animlist.txt` (FNIS/Nemesis registration lines)
-//! - `Nemesis_Engine/mod/<id>/info.ini`
-//! - `Nemesis_Engine/mod/<id>/README_SLSB.txt` instructing the user to run Nemesis
+//! Full behavior patches (clip generators, OStimSpeed bindings, nest state machine)
+//! are synthesized by [`crate::project::ostim::nemesis_gen`]. This module keeps
+//! animlist writing and the legacy stub helpers.
 
 use std::fs;
 use std::io::Write;
@@ -78,6 +75,7 @@ pub fn write_ostim_animlist(
     Ok(list_path)
 }
 
+#[cfg(test)]
 pub fn write_nemesis_stub(
     pack_root: &Path,
     pack_name: &str,

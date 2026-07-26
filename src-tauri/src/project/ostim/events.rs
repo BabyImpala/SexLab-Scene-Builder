@@ -62,6 +62,7 @@ pub fn animation_base_from_event(event: &str) -> Option<String> {
 }
 
 /// Build SexLab event id from OStim animation base + actor/stage (1-based).
+#[cfg(test)]
 pub fn ostim_to_slsb_event(animation: &str, actor_1based: usize, stage_1based: usize) -> String {
     format!("{animation}_A{actor_1based}_S{stage_1based}")
 }
