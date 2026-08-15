@@ -190,10 +190,21 @@ fn get_race_map() -> HashMap<String, RaceKey> {
 }
 
 pub fn get_race_keys_string() -> Vec<String> {
-    get_race_map()
+    let mut races: Vec<String> = get_race_map()
         .iter()
         .map(|(key, _)| key.clone())
-        .collect()
+        .collect();
+    
+    // Sort alphabetically first
+    races.sort();
+    
+    // Move "Human" to the top
+    if let Some(pos) = races.iter().position(|r| r == "Human") {
+        races.remove(pos);
+        races.insert(0, "Human".to_string());
+    }
+    
+    races
 }
 
 pub fn get_race_key_bytes(race: &str) -> Option<u8> {
