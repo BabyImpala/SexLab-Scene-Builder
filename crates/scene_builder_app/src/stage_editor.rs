@@ -33,7 +33,16 @@ pub struct StageEditorState {
 impl StageEditorState {
     pub fn new(scene_id: NanoID, stage: Stage, positions_info: Vec<PositionInfo>) -> Self {
         let mut race_keys = get_race_keys_string();
-        race_keys.sort();
+        race_keys.sort_by(|a, b| {
+            // Human always comes first
+            if a == "Human" {
+                std::cmp::Ordering::Less
+            } else if b == "Human" {
+                std::cmp::Ordering::Greater
+            } else {
+                a.cmp(b)
+            }
+        });
         let n = stage.positions.len().max(positions_info.len()).max(1);
         let mut infos = positions_info;
         while infos.len() < n {
